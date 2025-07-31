@@ -37,6 +37,13 @@ const variablesExpanded = ref(true);
 const stopTestRequested = ref(false);
 const expandedResults = ref<Set<string>>(new Set());
 
+// HTTPQL state
+const httpqlQuery = ref("");
+const httpqlResults = ref("");
+const isHttpqlRunning = ref(false);
+const filteredTestResults = ref<any[]>([]);
+const isQueryActive = ref(false);
+
 // Sample OpenAPI schema for testing
 const sampleSchema = `{
   "openapi": "3.0.0",
@@ -601,6 +608,110 @@ const stopAllTests = () => {
 const resetStopFlag = () => {
   stopTestRequested.value = false;
 };
+
+const runHttpqlQuery = async () => {
+  if (!httpqlQuery.value.trim()) {
+    return;
+  }
+
+  isHttpqlRunning.value = true;
+  httpqlResults.value = "";
+
+  try {
+    // Try to use GraphQL to query HTTP data (alternative to HTTPQL)
+    if (sdk.graphql && typeof sdk.graphql.query === 'function') {
+      try {
+        // Try to query HTTP history data using GraphQL
+        const query = `
+          query {
+            httpHistory {
+              requests {
+                id
+                method
+                url
+                statusCode
+                responseTime
+                timestamp
+              }
+            }
+          }
+        `;
+        const result = await sdk.graphql.query(query);
+        httpqlResults.value = JSON.stringify(result, null, 2);
+      } catch (graphqlError) {
+        // If GraphQL doesn't work, try to filter the results based on the HTTPQL-like query
+        await filterTestResultsByQuery();
+      }
+    } else {
+      // Fallback: filter test results based on the query
+      await filterTestResultsByQuery();
+    }
+  } catch (error) {
+    httpqlResults.value = `Error running query: ${error instanceof Error ? error.message : String(error)}\n\nQuery: ${httpqlQuery.value}`;
+  } finally {
+    isHttpqlRunning.value = false;
+  }
+};
+
+const filterTestResultsByQuery = async () => {
+  const query = httpqlQuery.value.toLowerCase();
+  
+  // Simple query parser for common HTTPQL-like patterns
+  if (query.includes('resp.code') || query.includes('status')) {
+    // Filter by status code
+    const statusMatch = query.match(/(?:resp\.code|status)\s*\.?\s*(?:eq|==|=)?\s*:?\s*(\d+)/);
+    if (statusMatch) {
+      const targetStatus = parseInt(statusMatch[1]);
+      const filteredResults = allTestResults.value.filter(result => result.status === targetStatus);
+      filteredTestResults.value = filteredResults;
+      isQueryActive.value = true;
+      httpqlResults.value = `Filtered results for status code ${targetStatus} (${filteredResults.length} results)`;
+    } else {
+      httpqlResults.value = `Query pattern recognized but no status code found.\n\nQuery: ${httpqlQuery.value}\n\nTry: resp.code.eq:200 or status:200`;
+      isQueryActive.value = false;
+    }
+  } else if (query.includes('method')) {
+    // Filter by HTTP method
+    const methodMatch = query.match(/method\s*\.?\s*(?:eq|==|=)?\s*:?\s*(get|post|put|delete|patch)/i);
+    if (methodMatch) {
+      const targetMethod = methodMatch[1].toUpperCase();
+      const filteredResults = allTestResults.value.filter(result => result.testCase.method === targetMethod);
+      filteredTestResults.value = filteredResults;
+      isQueryActive.value = true;
+      httpqlResults.value = `Filtered results for method ${targetMethod} (${filteredResults.length} results)`;
+    } else {
+      httpqlResults.value = `Query pattern recognized but no method found.\n\nQuery: ${httpqlQuery.value}\n\nTry: method.eq:GET or method:POST`;
+      isQueryActive.value = false;
+    }
+  } else if (query.includes('url') || query.includes('path')) {
+    // Filter by URL/path
+    const urlMatch = query.match(/(?:url|path)\s*\.?\s*(?:eq|==|=)?\s*:?\s*["']?([^"']+)["']?/);
+    if (urlMatch) {
+      const targetPath = urlMatch[1];
+      const filteredResults = allTestResults.value.filter(result => 
+        result.testCase.path.toLowerCase().includes(targetPath.toLowerCase())
+      );
+      filteredTestResults.value = filteredResults;
+      isQueryActive.value = true;
+      httpqlResults.value = `Filtered results for path containing "${targetPath}" (${filteredResults.length} results)`;
+    } else {
+      httpqlResults.value = `Query pattern recognized but no path found.\n\nQuery: ${httpqlQuery.value}\n\nTry: url.eq:"/users" or path:"/api"`;
+      isQueryActive.value = false;
+    }
+  } else {
+    // Show all results if no specific filter is applied
+    filteredTestResults.value = allTestResults.value;
+    isQueryActive.value = true;
+    httpqlResults.value = `Showing all test results (${allTestResults.value.length} results)`;
+  }
+};
+
+const clearQuery = () => {
+  httpqlQuery.value = "";
+  httpqlResults.value = "";
+  filteredTestResults.value = [];
+  isQueryActive.value = false;
+};
 </script>
 
 <template>
@@ -616,7 +727,7 @@ const resetStopFlag = () => {
       <div class="flex items-center gap-2">
         <Button 
           v-if="isSchemaLoaded && getUniquePathVariables().length > 0"
-          :label="sidebarOpen ? 'Hide Config' : 'Show Config'"
+          :label="sidebarOpen ? 'Hide Variables' : 'Variables'"
           @click="toggleSidebar"
           severity="secondary"
           size="small"
@@ -873,48 +984,73 @@ const resetStopFlag = () => {
 
           <!-- Test Results Tab -->
           <TabPanel header="Results">
-            <div v-if="!hasResults" class="text-center py-8 text-gray-500">
-              <i class="pi pi-chart-bar text-4xl mb-4"></i>
-              <p>No test results yet. Run tests from the Endpoints tab.</p>
-            </div>
+            <div class="space-y-4">
+              <!-- Query Bar -->
+              <Card>
+                <template #title>Query Test Results</template>
+                <template #content>
+                  <div class="space-y-4">
+                    <div class="flex items-center gap-4">
+                      <div class="flex-1">
+                        <label for="httpql-query" class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+                          Query Test Results
+                        </label>
+                        <div class="flex gap-2">
+                          <InputText
+                            id="httpql-query"
+                            v-model="httpqlQuery"
+                            placeholder="Enter query (e.g., resp.code.eq:200, method.eq:GET, url.eq:'/users')"
+                            class="flex-1"
+                            @keyup.enter="runHttpqlQuery"
+                          />
+                          <Button 
+                            label="Run Query" 
+                            icon="pi pi-play"
+                            @click="runHttpqlQuery"
+                            :loading="isHttpqlRunning"
+                            :disabled="!httpqlQuery.trim()"
+                          />
+                          <Button 
+                            v-if="isQueryActive"
+                            label="Clear" 
+                            icon="pi pi-times"
+                            @click="clearQuery"
+                            severity="secondary"
+                            size="small"
+                          />
+                        </div>
+                      </div>
+                    </div>
+                    
+                    <!-- Query Results -->
+                    <div v-if="httpqlResults" class="mt-4">
+                      <h4 class="font-medium text-gray-800 dark:text-gray-200 mb-2">Query Results</h4>
+                      <div class="bg-gray-50 dark:bg-gray-800 p-4 rounded-lg">
+                        <pre class="text-sm font-mono text-gray-900 dark:text-gray-100 overflow-auto max-h-64">{{ httpqlResults }}</pre>
+                      </div>
+                    </div>
+                  </div>
+                </template>
+              </Card>
 
-            <div v-else>
-              <div class="mb-4 p-4 bg-purple-50 dark:bg-purple-900/20 rounded-lg">
-                <h3 class="font-semibold text-purple-800 dark:text-purple-200 mb-2">Step 3: View Results</h3>
-                <p class="text-sm text-purple-700 dark:text-purple-300">
-                  View detailed test results, response times, and any errors that occurred during testing.
-                </p>
+              <!-- Test Results Section -->
+              <div v-if="!hasResults" class="text-center py-8 text-gray-500">
+                <i class="pi pi-chart-bar text-4xl mb-4"></i>
+                <p>No test results yet. Run tests from the Endpoints tab.</p>
               </div>
-
-              <div class="space-y-4">
-                <!-- Summary Cards -->
-                <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
-                  <Card class="text-center">
-                    <template #content>
-                      <div class="text-2xl font-bold text-blue-600">{{ totalTests }}</div>
-                      <div class="text-sm text-gray-600">Total Tests</div>
-                    </template>
-                  </Card>
-                  <Card class="text-center">
-                    <template #content>
-                      <div class="text-2xl font-bold text-green-600">{{ passedTests }}</div>
-                      <div class="text-sm text-gray-600">Passed</div>
-                    </template>
-                  </Card>
-                  <Card class="text-center">
-                    <template #content>
-                      <div class="text-2xl font-bold text-red-600">{{ failedTests }}</div>
-                      <div class="text-sm text-gray-600">Failed</div>
-                    </template>
-                  </Card>
-                </div>
-
+ 
+              <div v-else>
                 <!-- Results Table -->
                 <Card>
-                  <template #title>Test Results</template>
+                  <template #title>
+                    {{ isQueryActive ? 'Filtered Test Results' : 'Test Results' }}
+                    <span v-if="isQueryActive" class="text-sm text-gray-500 ml-2">
+                      ({{ filteredTestResults.length }} of {{ allTestResults.length }})
+                    </span>
+                  </template>
                   <template #content>
                     <div class="space-y-2">
-                      <div v-for="data in allTestResults" :key="getResultId(data)" class="border border-gray-200 dark:border-gray-700 rounded-lg">
+                      <div v-for="data in (isQueryActive ? filteredTestResults : allTestResults)" :key="getResultId(data)" class="border border-gray-200 dark:border-gray-700 rounded-lg">
                         <!-- Main Result Row -->
                         <div class="p-4 hover:bg-gray-50 dark:hover:bg-gray-700 cursor-pointer" @click="toggleResultExpansion(getResultId(data))">
                           <div class="flex items-center justify-between">
@@ -1075,10 +1211,12 @@ const resetStopFlag = () => {
                     {{ variable }}
                   </label>
                   <Button 
+                    label="Add Value"
                     icon="pi pi-plus"
                     @click="addPathVariableValue(variable)"
                     size="small"
-                    class="bg-white border border-gray-300 text-blue-600 hover:bg-gray-50"
+                    severity="success"
+                    class="text-xs px-2 py-1"
                   />
                 </div>
                 
@@ -1091,12 +1229,12 @@ const resetStopFlag = () => {
                     />
                     <Button 
                       v-if="getPathVariableValue(variable).length > 1"
-                      icon="pi pi-minus"
+                      label="Remove"
+                      icon="pi pi-trash"
                       @click="removePathVariableValue(variable, index)"
                       size="small"
-                      text
-                      rounded
-                      class="text-red-600"
+                      severity="danger"
+                      class="text-xs px-2 py-1"
                     />
                   </div>
                 </div>
