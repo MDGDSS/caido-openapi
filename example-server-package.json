@@ -1,0 +1,20 @@
+{
+  "name": "openapi-tester-example-server",
+  "version": "1.0.0",
+  "description": "Example API server for testing the OpenAPI Tester extension",
+  "main": "example-server.js",
+  "scripts": {
+    "start": "node example-server.js",
+    "dev": "nodemon example-server.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "cors": "^2.8.5"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.1"
+  },
+  "keywords": ["api", "testing", "openapi", "example"],
+  "author": "OpenAPI Tester",
+  "license": "MIT"
+} 
