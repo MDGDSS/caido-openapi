@@ -23,6 +23,7 @@ const workers = ref(10);
 const delayBetweenRequests = ref(0);
 const timeout = ref(30000);
 const useRandomValues = ref(false);
+const useParameterFromDefinition = ref(true); // Default to true to use example values
 const isLoading = ref(false);
 const validationResult = ref<{ valid: boolean; errors: string[] } | null>(null);
 const testResults = ref<any[]>([]);
@@ -43,6 +44,13 @@ const httpqlResults = ref("");
 const isHttpqlRunning = ref(false);
 const filteredTestResults = ref<any[]>([]);
 const isQueryActive = ref(false);
+
+// Schema definition viewer state
+const parsedSchema = ref<any>(null);
+const selectedPath = ref("");
+const selectedMethod = ref("");
+const expandedPaths = ref<Set<string>>(new Set());
+const expandedComponents = ref<Set<string>>(new Set());
 
 // Sample OpenAPI schema for testing
 const sampleSchema = `{
@@ -161,6 +169,9 @@ const loadSchema = async () => {
       // Parse the schema to get the OpenAPI object
       const schema = await sdk.backend.parseOpenAPISchema(schemaText.value);
       
+      // Store parsed schema for definition viewer
+      parsedSchema.value = schema;
+      
       // Generate test cases from the parsed schema
       const cases = await sdk.backend.generateTestCases(schema);
       testCases.value = cases;
@@ -218,7 +229,9 @@ const runAllTests = async () => {
       workers: workers.value,
       delayBetweenRequests: delayBetweenRequests.value,
       timeout: timeout.value,
-      headers: parseCustomHeaders()
+      headers: parseCustomHeaders(),
+      parsedSchema: parsedSchema.value, // Pass the parsed schema for example value generation
+      useParameterFromDefinition: useParameterFromDefinition.value // Pass the checkbox value
     };
     
     // Get all test cases first
@@ -235,14 +248,14 @@ const runAllTests = async () => {
       if (variableCombinations.length === 0) {
         // No path variables, run single test
         const result = await sdk.backend.runSingleTest(testCase, baseUrl.value, options, {});
-        testResults.value.push(result);
+        updateTestCaseResult(testCase, result);
       } else {
         // Run test for each combination
         for (const combination of variableCombinations) {
           if (stopTestRequested.value) break;
           
           const result = await sdk.backend.runSingleTest(testCase, baseUrl.value, options, combination);
-          testResults.value.push(result);
+          updateTestCaseResult(testCase, result, combination);
           
           // Add delay between requests if specified
           if (delayBetweenRequests.value > 0 && combination !== variableCombinations[variableCombinations.length - 1]) {
@@ -275,7 +288,9 @@ const runSingleTest = async (testCase: any) => {
       workers: 1,
       delayBetweenRequests: 0,
       timeout: timeout.value,
-      headers: parseCustomHeaders()
+      headers: parseCustomHeaders(),
+      parsedSchema: parsedSchema.value, // Pass the parsed schema for example value generation
+      useParameterFromDefinition: useParameterFromDefinition.value // Pass the checkbox value
     };
     
     // Get all combinations of path variable values
@@ -392,6 +407,27 @@ const getStatusClass = (success: boolean) => {
 
 const formatResponseTime = (time: number) => {
   return `${time}ms`;
+};
+
+const getResponseSize = (response: any) => {
+  try {
+    const length = getResponseLength(response);
+    if (typeof length === 'string') {
+      return length; // Return error message as is
+    }
+    
+    if (length === 0) {
+      return '0 bytes';
+    } else if (length < 1024) {
+      return `${length} bytes`;
+    } else if (length < 1024 * 1024) {
+      return `${(length / 1024).toFixed(1)} KB`;
+    } else {
+      return `${(length / (1024 * 1024)).toFixed(1)} MB`;
+    }
+  } catch (error) {
+    return 'Error calculating size';
+  }
 };
 
 const getResponseLength = (response: any) => {
@@ -712,6 +748,261 @@ const clearQuery = () => {
   filteredTestResults.value = [];
   isQueryActive.value = false;
 };
+
+// Schema definition viewer helper functions
+const togglePathExpansion = (path: string) => {
+  if (expandedPaths.value.has(path)) {
+    expandedPaths.value.delete(path);
+  } else {
+    expandedPaths.value.add(path);
+  }
+};
+
+const toggleComponentExpansion = (componentName: string) => {
+  if (expandedComponents.value.has(componentName)) {
+    expandedComponents.value.delete(componentName);
+  } else {
+    expandedComponents.value.add(componentName);
+  }
+};
+
+const isPathExpanded = (path: string) => {
+  return expandedPaths.value.has(path);
+};
+
+const isComponentExpanded = (componentName: string) => {
+  return expandedComponents.value.has(componentName);
+};
+
+const getMethodColor = (method: string) => {
+  const colors = {
+    get: 'bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200',
+    post: 'bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-200',
+    put: 'bg-yellow-100 text-yellow-800 dark:bg-yellow-900 dark:text-yellow-200',
+    delete: 'bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200',
+    patch: 'bg-purple-100 text-purple-800 dark:bg-purple-900 dark:text-purple-200'
+  };
+  return colors[method.toLowerCase() as keyof typeof colors] || 'bg-gray-100 text-gray-800 dark:bg-gray-900 dark:text-gray-200';
+};
+
+const formatSchemaType = (schema: any) => {
+  if (!schema) return 'any';
+  
+  // Handle $ref (schema references)
+  if (schema.$ref) {
+    const refName = schema.$ref.split('/').pop();
+    return `ref: ${refName}`;
+  }
+  
+  // Handle basic types
+  if (schema.type) {
+    let typeStr = schema.type;
+    
+    // Add format if available
+    if (schema.format) {
+      typeStr += ` (${schema.format})`;
+    }
+    
+    // Add array information
+    if (schema.type === 'array' && schema.items) {
+      const itemType = formatSchemaType(schema.items);
+      typeStr = `array of ${itemType}`;
+    }
+    
+    // Add object information
+    if (schema.type === 'object') {
+      if (schema.properties) {
+        const propCount = Object.keys(schema.properties).length;
+        typeStr = `object (${propCount} properties)`;
+      } else if (schema.additionalProperties) {
+        typeStr = `object with additional properties`;
+      }
+    }
+    
+    return typeStr;
+  }
+  
+  // Handle complex schemas
+  if (schema.oneOf) return 'oneOf';
+  if (schema.allOf) return 'allOf';
+  if (schema.anyOf) return 'anyOf';
+  if (schema.not) return 'not';
+  
+  // Handle enums
+  if (schema.enum) {
+    return `enum (${schema.enum.length} values)`;
+  }
+  
+  // Default fallback
+  return 'object';
+};
+
+const getSchemaDescription = (schema: any) => {
+  if (schema.description) return schema.description;
+  if (schema.summary) return schema.summary;
+  return '';
+};
+
+// Find possible object definitions that might match a generic parameter
+const findPossibleObjectDefinitions = (schema: any, context?: any): any[] => {
+  const definitions = parsedSchema.value?.definitions || {};
+  const schemas = parsedSchema.value?.components?.schemas || {};
+  
+  // Look for definitions that have properties (not just additionalProperties)
+  const candidates: any[] = [];
+  
+  // First, try to find definitions that might be referenced by the schema
+  if (schema && schema.$ref) {
+    const refName = schema.$ref.split('/').pop();
+    const refSchema = definitions[refName] || schemas[refName];
+    if (refSchema && refSchema.properties && Object.keys(refSchema.properties).length > 0) {
+      candidates.push(refSchema);
+    }
+  }
+  
+  // If context is provided, try to find definitions that match the context
+  if (context && context.path) {
+    const pathKeywords = context.path.toLowerCase().split(/[\/\-_]/).filter(k => k.length > 2);
+    const nameKeywords = context.name ? context.name.toLowerCase().split(/[\s\-_]/).filter(k => k.length > 2) : [];
+    const allKeywords = [...pathKeywords, ...nameKeywords];
+    
+    // Check definitions (Swagger 2.0)
+    for (const [name, def] of Object.entries(definitions)) {
+      if (def && typeof def === 'object' && def.properties && Object.keys(def.properties).length > 0) {
+        // Check if the definition name contains any keywords from the context
+        const nameLower = name.toLowerCase();
+        const hasMatchingKeyword = allKeywords.some(keyword => nameLower.includes(keyword));
+        
+        if (hasMatchingKeyword) {
+          candidates.push(def);
+        }
+      }
+    }
+    
+    // Check schemas (OpenAPI 3.x)
+    for (const [name, schema] of Object.entries(schemas)) {
+      if (schema && typeof schema === 'object' && schema.properties && Object.keys(schema.properties).length > 0) {
+        // Check if the schema name contains any keywords from the context
+        const nameLower = name.toLowerCase();
+        const hasMatchingKeyword = allKeywords.some(keyword => nameLower.includes(keyword));
+        
+        if (hasMatchingKeyword) {
+          candidates.push(schema);
+        }
+      }
+    }
+  }
+  
+  // If no contextual matches found, fall back to all definitions but prioritize by relevance
+  if (candidates.length === 0) {
+    for (const [name, def] of Object.entries(definitions)) {
+      if (def && typeof def === 'object' && def.properties && Object.keys(def.properties).length > 0) {
+        candidates.push(def);
+      }
+    }
+    
+    for (const [name, schema] of Object.entries(schemas)) {
+      if (schema && typeof schema === 'object' && schema.properties && Object.keys(schema.properties).length > 0) {
+        candidates.push(schema);
+      }
+    }
+  }
+  
+  // Sort by number of properties (prefer more detailed objects)
+  candidates.sort((a, b) => {
+    const aProps = Object.keys(a.properties || {}).length;
+    const bProps = Object.keys(b.properties || {}).length;
+    return bProps - aProps;
+  });
+  
+  return candidates;
+};
+
+// Generate example value for schema (like Swagger UI)
+const generateExampleValue = (schema: any, depth: number = 0): any => {
+  if (depth > 10) return '...'; // Much higher limit for complex schemas
+  
+  // Handle $ref
+  if (schema.$ref) {
+    const refName = schema.$ref.split('/').pop();
+    // Try to find the referenced schema
+    const refSchema = parsedSchema.value?.components?.schemas?.[refName] || 
+                     parsedSchema.value?.definitions?.[refName];
+    if (refSchema) {
+      return generateExampleValue(refSchema, depth + 1);
+    }
+    return `{${refName}}`;
+  }
+  
+  // Handle basic types
+  if (schema.type) {
+    switch (schema.type) {
+      case 'string':
+        if (schema.format === 'date-time') return '2025-08-02T16:56:40.491Z';
+        if (schema.format === 'date') return '2025-08-02';
+        if (schema.format === 'email') return 'user@example.com';
+        if (schema.enum) return schema.enum[0];
+        if (schema.example) return schema.example;
+        return 'string';
+      case 'integer':
+      case 'number':
+        if (schema.example) return schema.example;
+        if (schema.default) return schema.default;
+        return 0;
+      case 'boolean':
+        if (schema.example) return schema.example;
+        return true;
+      case 'array':
+        if (schema.items) {
+          const itemExample = generateExampleValue(schema.items, depth + 1);
+          return [itemExample];
+        }
+        return [];
+      case 'object':
+        if (schema.properties) {
+          const obj: any = {};
+          for (const [propName, propSchema] of Object.entries(schema.properties)) {
+            obj[propName] = generateExampleValue(propSchema as any, depth + 1);
+          }
+          return obj;
+        }
+        if (schema.additionalProperties) {
+          // For additionalProperties in Definition tab, just generate a realistic example
+          // without trying to find a "better" definition, since we want to show the actual schema
+          const additionalPropType = generateExampleValue(schema.additionalProperties, depth + 1);
+          return {
+            'id': typeof additionalPropType === 'number' ? 1 : 'example',
+            'name': typeof additionalPropType === 'string' ? 'example' : 'Example Name',
+            'value': additionalPropType,
+            'enabled': typeof additionalPropType === 'boolean' ? true : false
+          };
+        }
+        return {};
+    }
+  }
+  
+  // Handle enums
+  if (schema.enum) {
+    return schema.enum[0];
+  }
+  
+  // Handle examples
+  if (schema.example) {
+    return schema.example;
+  }
+  
+  return 'example';
+};
+
+// Format example value as JSON string
+const formatExampleValue = (schema: any): string => {
+  try {
+    const example = generateExampleValue(schema);
+    return JSON.stringify(example, null, 2);
+  } catch (error) {
+    return '{}';
+  }
+};
 </script>
 
 <template>
@@ -743,7 +1034,7 @@ const clearQuery = () => {
         <div class="p-4">
         <TabView v-model:activeIndex="activeTab" class="h-full">
           <!-- Schema Input Tab -->
-          <TabPanel header="Definition">
+          <TabPanel header="Input">
             <div class="mb-4 p-4 bg-blue-50 dark:bg-blue-900/20 rounded-lg">
               <h3 class="font-semibold text-blue-800 dark:text-blue-200 mb-2">Step 1: Input Your Schema</h3>
               <p class="text-sm text-blue-700 dark:text-blue-300">
@@ -805,7 +1096,7 @@ const clearQuery = () => {
           <TabPanel header="Endpoints">
             <div v-if="!isSchemaLoaded" class="text-center py-8 text-gray-500">
               <i class="pi pi-list text-4xl mb-4"></i>
-              <p>No schema loaded yet. Load a valid schema from the Definition tab.</p>
+              <p>No schema loaded yet. Load a valid schema from the Input tab.</p>
             </div>
 
             <div v-else>
@@ -878,7 +1169,7 @@ const clearQuery = () => {
                        </p>
                      </div>
                      
-                     <div class="mt-4">
+                     <div class="mt-4 space-y-3">
                        <div class="flex items-center gap-2">
                          <input 
                            type="checkbox" 
@@ -888,8 +1179,21 @@ const clearQuery = () => {
                          />
                          <label for="randomValues" class="text-sm font-medium">Use Random Values for Empty Variables</label>
                        </div>
-                       <p class="text-xs text-gray-500 mt-1">
+                       <p class="text-xs text-gray-500">
                          When enabled, empty path variables will be filled with random strings instead of being left empty.
+                       </p>
+                       
+                       <div class="flex items-center gap-2">
+                         <input 
+                           type="checkbox" 
+                           id="useParameterFromDefinition"
+                           v-model="useParameterFromDefinition"
+                           class="w-4 h-4 text-blue-600 bg-gray-100 border-gray-300 rounded focus:ring-blue-500 focus:ring-2"
+                         />
+                         <label for="useParameterFromDefinition" class="text-sm font-medium">Use Parameter from Definition</label>
+                       </div>
+                       <p class="text-xs text-gray-500">
+                         When enabled, POST/PUT requests will use example values from the schema definition as request body.
                        </p>
                      </div>
                     
@@ -979,6 +1283,509 @@ const clearQuery = () => {
                   </template>
                 </Card>
               </div>
+            </div>
+          </TabPanel>
+
+          <!-- Schema Definition Tab -->
+          <TabPanel header="Definition">
+            <div v-if="!parsedSchema" class="text-center py-8 text-gray-500">
+              <i class="pi pi-file-text text-4xl mb-4"></i>
+              <p>No schema loaded yet. Load a valid schema from the Input tab to view its definition.</p>
+            </div>
+
+            <div v-else class="space-y-6">
+              <!-- API Info Section -->
+              <Card>
+                <template #title>
+                  <div class="flex items-center gap-2">
+                    <i class="pi pi-info-circle text-blue-500"></i>
+                    API Information
+                  </div>
+                </template>
+                <template #content>
+                  <div class="space-y-4">
+                    <!-- Basic Info -->
+                    <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                      <div>
+                        <label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Title</label>
+                        <p class="text-sm text-gray-900 dark:text-gray-100">{{ parsedSchema.info?.title || 'N/A' }}</p>
+                      </div>
+                      <div>
+                        <label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Version</label>
+                        <p class="text-sm text-gray-900 dark:text-gray-100">{{ parsedSchema.info?.version || 'N/A' }}</p>
+                      </div>
+                      <div v-if="parsedSchema.info?.description" class="md:col-span-2">
+                        <label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Description</label>
+                        <p class="text-sm text-gray-900 dark:text-gray-100">{{ parsedSchema.info.description }}</p>
+                      </div>
+                      <div v-if="parsedSchema.info?.contact" class="md:col-span-2">
+                        <label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Contact</label>
+                        <p class="text-sm text-gray-900 dark:text-gray-100">
+                          {{ parsedSchema.info.contact.name || '' }}
+                          {{ parsedSchema.info.contact.email ? `(${parsedSchema.info.contact.email})` : '' }}
+                          {{ parsedSchema.info.contact.url ? `- ${parsedSchema.info.contact.url}` : '' }}
+                        </p>
+                      </div>
+                      <div v-if="parsedSchema.info?.license" class="md:col-span-2">
+                        <label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">License</label>
+                        <p class="text-sm text-gray-900 dark:text-gray-100">
+                          {{ parsedSchema.info.license.name }}
+                          {{ parsedSchema.info.license.url ? `(${parsedSchema.info.license.url})` : '' }}
+                        </p>
+                      </div>
+                      <div v-if="parsedSchema.openapi || parsedSchema.swagger">
+                        <label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">OpenAPI Version</label>
+                        <p class="text-sm text-gray-900 dark:text-gray-100">{{ parsedSchema.openapi || parsedSchema.swagger }}</p>
+                      </div>
+                    </div>
+                    
+                    <!-- Server Information -->
+                    <div v-if="parsedSchema.servers || parsedSchema.host">
+                      <h4 class="font-medium text-gray-700 dark:text-gray-300 mb-2">Server Information</h4>
+                      <div class="space-y-2">
+                        <div v-if="parsedSchema.host">
+                          <span class="font-medium text-gray-600 dark:text-gray-400">Host:</span>
+                          <code class="ml-2 text-sm bg-gray-100 dark:bg-gray-700 px-2 py-1 rounded">{{ parsedSchema.host }}</code>
+                        </div>
+                        <div v-if="parsedSchema.basePath">
+                          <span class="font-medium text-gray-600 dark:text-gray-400">Base Path:</span>
+                          <code class="ml-2 text-sm bg-gray-100 dark:bg-gray-700 px-2 py-1 rounded">{{ parsedSchema.basePath }}</code>
+                        </div>
+                        <div v-if="parsedSchema.schemes">
+                          <span class="font-medium text-gray-600 dark:text-gray-400">Schemes:</span>
+                          <span class="ml-2 text-sm">{{ parsedSchema.schemes.join(', ') }}</span>
+                        </div>
+                        <div v-if="parsedSchema.servers">
+                          <span class="font-medium text-gray-600 dark:text-gray-400">Servers:</span>
+                          <div class="ml-2 space-y-1">
+                            <div v-for="(server, index) in parsedSchema.servers" :key="index" class="text-sm">
+                              <code class="bg-gray-100 dark:bg-gray-700 px-2 py-1 rounded">{{ server.url }}</code>
+                              <span v-if="server.description" class="ml-2 text-gray-500">- {{ server.description }}</span>
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                    
+                    <!-- Tags Information -->
+                    <div v-if="parsedSchema.tags">
+                      <h4 class="font-medium text-gray-700 dark:text-gray-300 mb-2">Tags</h4>
+                      <div class="space-y-2">
+                        <div v-for="tag in parsedSchema.tags" :key="tag.name" class="flex items-center gap-2">
+                          <span class="px-2 py-1 bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-200 text-xs rounded">{{ tag.name }}</span>
+                          <span v-if="tag.description" class="text-sm text-gray-600 dark:text-gray-400">{{ tag.description }}</span>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </template>
+              </Card>
+
+              <!-- Paths Section -->
+              <Card>
+                <template #title>
+                  <div class="flex items-center gap-2">
+                    <i class="pi pi-link text-green-500"></i>
+                    API Endpoints ({{ Object.keys(parsedSchema.paths || {}).length }})
+                  </div>
+                </template>
+                <template #content>
+                  <div class="space-y-4">
+                    <div v-for="(methods, path) in parsedSchema.paths" :key="path" class="border border-gray-200 dark:border-gray-700 rounded-lg">
+                      <!-- Path Header -->
+                      <div 
+                        class="flex items-center justify-between p-3 bg-gray-50 dark:bg-gray-800 cursor-pointer hover:bg-gray-100 dark:hover:bg-gray-700"
+                        @click="togglePathExpansion(path)"
+                      >
+                        <div class="flex items-center gap-2">
+                          <i :class="isPathExpanded(path) ? 'pi pi-chevron-down' : 'pi pi-chevron-right'" class="text-gray-500"></i>
+                          <span class="font-mono text-sm font-medium text-gray-900 dark:text-gray-100">{{ path }}</span>
+                        </div>
+                        <span class="text-xs text-gray-500">{{ Object.keys(methods).length }} methods</span>
+                      </div>
+
+                      <!-- Path Methods -->
+                      <div v-if="isPathExpanded(path)" class="p-4 space-y-4">
+                        <div v-for="(operation, method) in methods" :key="method" class="border-l-4 border-gray-200 dark:border-gray-600 pl-4">
+                          <!-- Method Header -->
+                          <div class="flex items-center gap-3 mb-3">
+                            <span :class="['px-2 py-1 text-xs font-semibold rounded', getMethodColor(method)]">
+                              {{ method.toUpperCase() }}
+                            </span>
+                            <h4 class="font-medium text-gray-900 dark:text-gray-100">
+                              {{ operation.summary || operation.operationId || `${method.toUpperCase()} ${path}` }}
+                            </h4>
+                          </div>
+
+                          <!-- Operation Details -->
+                          <div class="space-y-4 text-sm">
+                            <!-- Operation ID and Tags -->
+                            <div class="flex items-center gap-4 text-xs">
+                              <div v-if="operation.operationId">
+                                <span class="font-medium text-gray-600 dark:text-gray-400">Operation ID:</span>
+                                <code class="ml-1 bg-gray-100 dark:bg-gray-700 px-2 py-1 rounded">{{ operation.operationId }}</code>
+                              </div>
+                              <div v-if="operation.tags && operation.tags.length > 0">
+                                <span class="font-medium text-gray-600 dark:text-gray-400">Tags:</span>
+                                <span v-for="tag in operation.tags" :key="tag" class="ml-1 px-2 py-1 bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-200 rounded text-xs">{{ tag }}</span>
+                              </div>
+                            </div>
+
+                            <div v-if="operation.description" class="text-gray-600 dark:text-gray-400">
+                              {{ operation.description }}
+                            </div>
+
+                            <!-- Consumes/Produces (Swagger 2.0) -->
+                            <div v-if="operation.consumes || operation.produces" class="flex items-center gap-4 text-xs">
+                              <div v-if="operation.consumes">
+                                <span class="font-medium text-gray-600 dark:text-gray-400">Consumes:</span>
+                                <span class="ml-1">{{ operation.consumes.join(', ') }}</span>
+                              </div>
+                              <div v-if="operation.produces">
+                                <span class="font-medium text-gray-600 dark:text-gray-400">Produces:</span>
+                                <span class="ml-1">{{ operation.produces.join(', ') }}</span>
+                              </div>
+                            </div>
+
+                            <!-- Parameters -->
+                            <div v-if="operation.parameters && operation.parameters.length > 0">
+                              <h5 class="font-medium text-gray-700 dark:text-gray-300 mb-2">Parameters</h5>
+                              <div class="space-y-3">
+                                <div v-for="param in operation.parameters" :key="param.name" class="border border-gray-200 dark:border-gray-600 rounded p-3">
+                                  <div class="flex items-center gap-2 mb-1">
+                                    <span class="font-mono text-gray-900 dark:text-gray-100 font-medium">{{ param.name }}</span>
+                                    <span class="px-2 py-1 bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-400 rounded text-xs">{{ param.in }}</span>
+                                    <span v-if="param.required" class="px-2 py-1 bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200 rounded text-xs font-medium">required</span>
+                                    <span v-else class="px-2 py-1 bg-gray-100 text-gray-600 dark:bg-gray-700 dark:text-gray-400 rounded text-xs">optional</span>
+                                    <span v-if="param.schema" class="px-2 py-1 bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-200 rounded text-xs">{{ formatSchemaType(param.schema) }}</span>
+                                  </div>
+                                  <div v-if="param.description" class="text-gray-600 dark:text-gray-400 text-xs">
+                                    {{ param.description }}
+                                  </div>
+                                  
+                                  <!-- Body Parameter Details (like Swagger UI) -->
+                                  <div v-if="param.in === 'body' && param.schema" class="mt-3">
+                                    <div class="bg-gray-50 dark:bg-gray-800 p-3 rounded">
+                                      <div class="text-xs text-gray-500 dark:text-gray-400 mb-2">Request Body Schema:</div>
+                                      <div class="text-sm font-mono text-gray-900 dark:text-gray-100 mb-2">{{ formatSchemaType(param.schema) }}</div>
+                                      
+                                      <!-- Schema Reference (if it's a $ref) -->
+                                      <div v-if="param.schema.$ref" class="mb-3">
+                                        <div class="text-xs text-gray-500 dark:text-gray-400 mb-1">References:</div>
+                                        <code class="text-xs bg-gray-100 dark:bg-gray-700 px-2 py-1 rounded">{{ param.schema.$ref }}</code>
+                                      </div>
+                                      
+                                      <!-- Example Value (like Swagger UI) -->
+                                      <div class="mb-3">
+                                        <div class="text-xs text-gray-500 dark:text-gray-400 mb-1">Example Value:</div>
+                                        <pre class="text-xs bg-gray-900 dark:bg-gray-700 text-gray-100 p-3 rounded overflow-auto max-h-48 font-mono">{{ formatExampleValue(param.schema) }}</pre>
+                                      </div>
+                                      
+                                      <!-- Schema Properties (if available) -->
+                                      <div v-if="param.schema.properties" class="space-y-2">
+                                        <div class="text-xs text-gray-500 dark:text-gray-400">Properties:</div>
+                                        <div class="space-y-1 pl-2">
+                                          <div v-for="(prop, propName) in param.schema.properties" :key="propName" class="flex items-center gap-2 text-xs">
+                                            <span class="font-mono text-gray-700 dark:text-gray-300 font-medium">{{ propName }}</span>
+                                            <span class="px-1 py-0.5 bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-200 rounded">{{ formatSchemaType(prop) }}</span>
+                                            <span v-if="prop.description" class="text-gray-500">- {{ prop.description }}</span>
+                                            <span v-if="prop.example" class="text-gray-400">(example: {{ prop.example }})</span>
+                                            <span v-if="prop.default" class="text-gray-400">(default: {{ prop.default }})</span>
+                                          </div>
+                                        </div>
+                                      </div>
+                                      
+                                      <!-- Additional Properties -->
+                                      <div v-if="param.schema.additionalProperties" class="mt-2">
+                                        <div class="text-xs text-gray-500 dark:text-gray-400">Additional Properties:</div>
+                                        <span class="text-xs text-gray-700 dark:text-gray-300">{{ formatSchemaType(param.schema.additionalProperties) }}</span>
+                                      </div>
+                                    </div>
+                                  </div>
+                                  
+                                  <!-- Non-body Parameter Details -->
+                                  <div v-if="param.in !== 'body' && param.schema && param.schema.properties" class="mt-2">
+                                    <div class="text-xs text-gray-500 dark:text-gray-400 mb-1">Properties:</div>
+                                    <div class="space-y-1 pl-2">
+                                      <div v-for="(prop, propName) in param.schema.properties" :key="propName" class="flex items-center gap-2">
+                                        <span class="font-mono text-gray-700 dark:text-gray-300">{{ propName }}</span>
+                                        <span class="text-blue-500">{{ formatSchemaType(prop) }}</span>
+                                        <span v-if="prop.description" class="text-gray-500">- {{ prop.description }}</span>
+                                      </div>
+                                    </div>
+                                  </div>
+                                </div>
+                              </div>
+                            </div>
+
+                            <!-- Request Body -->
+                            <div v-if="operation.requestBody">
+                              <h5 class="font-medium text-gray-700 dark:text-gray-300 mb-2">Request Body</h5>
+                              <div class="border border-gray-200 dark:border-gray-600 rounded p-3">
+                                <div v-if="operation.requestBody.required !== undefined" class="mb-2">
+                                  <span v-if="operation.requestBody.required" class="px-2 py-1 bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200 rounded text-xs font-medium">required</span>
+                                  <span v-else class="px-2 py-1 bg-gray-100 text-gray-600 dark:bg-gray-700 dark:text-gray-400 rounded text-xs">optional</span>
+                                </div>
+                                <div v-if="operation.requestBody.content">
+                                  <div v-for="(content, mediaType) in operation.requestBody.content" :key="mediaType" class="mb-3">
+                                    <div class="text-gray-600 dark:text-gray-400 mb-1 font-medium">{{ mediaType }}</div>
+                                    <div v-if="content.schema" class="bg-gray-50 dark:bg-gray-800 p-3 rounded text-xs font-mono">
+                                      <div class="text-gray-900 dark:text-gray-100 mb-1">{{ formatSchemaType(content.schema) }}</div>
+                                      
+                                      <!-- Schema Reference (if it's a $ref) -->
+                                      <div v-if="content.schema.$ref" class="mb-2">
+                                        <div class="text-xs text-gray-500 dark:text-gray-400 mb-1">References:</div>
+                                        <code class="text-xs bg-gray-100 dark:bg-gray-700 px-2 py-1 rounded">{{ content.schema.$ref }}</code>
+                                      </div>
+                                      
+                                      <!-- Example Value (like Swagger UI) -->
+                                      <div class="mb-2">
+                                        <div class="text-xs text-gray-500 dark:text-gray-400 mb-1">Example Value:</div>
+                                        <pre class="text-xs bg-gray-900 dark:bg-gray-700 text-gray-100 p-2 rounded overflow-auto max-h-32 font-mono">{{ formatExampleValue(content.schema) }}</pre>
+                                      </div>
+                                      
+                                      <div v-if="content.schema.properties" class="space-y-1 pl-2">
+                                        <div v-for="(prop, propName) in content.schema.properties" :key="propName" class="flex items-center gap-2">
+                                          <span class="font-mono text-gray-700 dark:text-gray-300">{{ propName }}</span>
+                                          <span class="text-blue-500">{{ formatSchemaType(prop) }}</span>
+                                          <span v-if="prop.description" class="text-gray-500">- {{ prop.description }}</span>
+                                        </div>
+                                      </div>
+                                    </div>
+                                  </div>
+                                </div>
+                              </div>
+                            </div>
+
+                            <!-- Responses -->
+                            <div v-if="operation.responses">
+                              <h5 class="font-medium text-gray-700 dark:text-gray-300 mb-2">Responses</h5>
+                              <div class="space-y-3">
+                                <div v-for="(response, statusCode) in operation.responses" :key="statusCode" class="border border-gray-200 dark:border-gray-600 rounded p-3">
+                                  <div class="flex items-center gap-2 mb-2">
+                                    <span :class="[
+                                      'px-2 py-1 rounded font-medium text-xs',
+                                      statusCode.startsWith('2') ? 'bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200' :
+                                      statusCode.startsWith('4') ? 'bg-yellow-100 text-yellow-800 dark:bg-yellow-900 dark:text-yellow-200' :
+                                      statusCode.startsWith('5') ? 'bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200' :
+                                      'bg-gray-100 text-gray-800 dark:bg-gray-900 dark:text-gray-200'
+                                    ]">
+                                      {{ statusCode }}
+                                    </span>
+                                    <span class="text-gray-600 dark:text-gray-400 font-medium">{{ response.description || 'No description' }}</span>
+                                  </div>
+                                  <div v-if="response.content" class="space-y-2">
+                                    <div v-for="(content, mediaType) in response.content" :key="mediaType">
+                                      <div class="text-gray-600 dark:text-gray-400 text-xs mb-1">{{ mediaType }}</div>
+                                      <div v-if="content.schema" class="bg-gray-50 dark:bg-gray-800 p-2 rounded text-xs font-mono">
+                                        {{ formatSchemaType(content.schema) }}
+                                      </div>
+                                    </div>
+                                  </div>
+                                  <div v-if="response.schema" class="bg-gray-50 dark:bg-gray-800 p-2 rounded text-xs font-mono">
+                                    {{ formatSchemaType(response.schema) }}
+                                  </div>
+                                </div>
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </template>
+              </Card>
+
+              <!-- Components Section -->
+              <Card v-if="parsedSchema.components || parsedSchema.definitions">
+                <template #title>
+                  <div class="flex items-center gap-2">
+                    <i class="pi pi-cube text-purple-500"></i>
+                    Components & Definitions
+                  </div>
+                </template>
+                <template #content>
+                  <div class="space-y-6">
+                    <!-- Schemas (OpenAPI 3.x) -->
+                    <div v-if="parsedSchema.components?.schemas">
+                      <h4 class="font-medium text-gray-700 dark:text-gray-300 mb-3">Schemas</h4>
+                      <div class="space-y-3">
+                        <div v-for="(schema, name) in parsedSchema.components.schemas" :key="name" class="border border-gray-200 dark:border-gray-700 rounded-lg">
+                          <div 
+                            class="flex items-center justify-between p-3 bg-gray-50 dark:bg-gray-800 cursor-pointer hover:bg-gray-100 dark:hover:bg-gray-700"
+                            @click="toggleComponentExpansion(name)"
+                          >
+                            <div class="flex items-center gap-3">
+                              <i :class="isComponentExpanded(name) ? 'pi pi-chevron-down' : 'pi pi-chevron-right'" class="text-gray-500"></i>
+                              <span class="font-medium text-gray-900 dark:text-gray-100">{{ name }}</span>
+                              <span class="px-2 py-1 bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-200 rounded text-xs">{{ formatSchemaType(schema) }}</span>
+                            </div>
+                            <div class="flex items-center gap-2 text-xs text-gray-500">
+                              <span v-if="schema.properties">{{ Object.keys(schema.properties).length }} properties</span>
+                              <span v-if="schema.required">{{ schema.required.length }} required</span>
+                            </div>
+                          </div>
+                          
+                          <div v-if="isComponentExpanded(name)" class="p-4 space-y-4">
+                            <div v-if="schema.description" class="text-sm text-gray-600 dark:text-gray-400 bg-gray-50 dark:bg-gray-800 p-3 rounded">
+                              {{ schema.description }}
+                            </div>
+                            
+                            <!-- Schema Type Info -->
+                            <div class="flex items-center gap-4 text-xs">
+                              <div v-if="schema.type">
+                                <span class="font-medium text-gray-600 dark:text-gray-400">Type:</span>
+                                <span class="ml-1 px-2 py-1 bg-gray-100 dark:bg-gray-700 rounded">{{ schema.type }}</span>
+                              </div>
+                              <div v-if="schema.format">
+                                <span class="font-medium text-gray-600 dark:text-gray-400">Format:</span>
+                                <span class="ml-1 px-2 py-1 bg-gray-100 dark:bg-gray-700 rounded">{{ schema.format }}</span>
+                              </div>
+                              <div v-if="schema.example">
+                                <span class="font-medium text-gray-600 dark:text-gray-400">Example:</span>
+                                <code class="ml-1 bg-gray-100 dark:bg-gray-700 px-2 py-1 rounded">{{ schema.example }}</code>
+                              </div>
+                            </div>
+                            
+                            <!-- Properties -->
+                            <div v-if="schema.properties" class="space-y-3">
+                              <h5 class="font-medium text-gray-700 dark:text-gray-300">Properties</h5>
+                              <div class="space-y-2">
+                                <div v-for="(prop, propName) in schema.properties" :key="propName" class="border border-gray-200 dark:border-gray-600 rounded p-3">
+                                  <div class="flex items-center gap-2 mb-1">
+                                    <span class="font-medium text-gray-900 dark:text-gray-100">{{ propName }}</span>
+                                    <span class="px-2 py-1 bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-200 rounded text-xs">{{ formatSchemaType(prop) }}</span>
+                                    <span v-if="schema.required && schema.required.includes(propName)" class="px-2 py-1 bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200 rounded text-xs font-medium">required</span>
+                                    <span v-else class="px-2 py-1 bg-gray-100 text-gray-600 dark:bg-gray-700 dark:text-gray-400 rounded text-xs">optional</span>
+                                  </div>
+                                  <div v-if="prop.description" class="text-sm text-gray-600 dark:text-gray-400 mb-2">
+                                    {{ prop.description }}
+                                  </div>
+                                  <div class="flex items-center gap-4 text-xs">
+                                    <div v-if="prop.format">
+                                      <span class="font-medium text-gray-600 dark:text-gray-400">Format:</span>
+                                      <span class="ml-1 px-2 py-1 bg-gray-100 dark:bg-gray-700 rounded">{{ prop.format }}</span>
+                                    </div>
+                                    <div v-if="prop.example">
+                                      <span class="font-medium text-gray-600 dark:text-gray-400">Example:</span>
+                                      <code class="ml-1 bg-gray-100 dark:bg-gray-700 px-2 py-1 rounded">{{ prop.example }}</code>
+                                    </div>
+                                    <div v-if="prop.default">
+                                      <span class="font-medium text-gray-600 dark:text-gray-400">Default:</span>
+                                      <code class="ml-1 bg-gray-100 dark:bg-gray-700 px-2 py-1 rounded">{{ prop.default }}</code>
+                                    </div>
+                                  </div>
+                                  <div v-if="prop.enum" class="mt-2">
+                                    <div class="text-xs text-gray-500 dark:text-gray-400 mb-1">Enum values:</div>
+                                    <div class="flex flex-wrap gap-1">
+                                      <span v-for="enumValue in prop.enum" :key="enumValue" class="px-2 py-1 bg-gray-100 dark:bg-gray-700 text-gray-700 dark:text-gray-300 rounded text-xs">{{ enumValue }}</span>
+                                    </div>
+                                  </div>
+                                </div>
+                              </div>
+                            </div>
+                            
+                            <!-- Required Fields Summary -->
+                            <div v-if="schema.required && schema.required.length > 0" class="bg-yellow-50 dark:bg-yellow-900/20 p-3 rounded">
+                              <h6 class="font-medium text-yellow-800 dark:text-yellow-200 mb-2">Required Fields</h6>
+                              <div class="flex flex-wrap gap-2">
+                                <span v-for="requiredField in schema.required" :key="requiredField" class="px-2 py-1 bg-yellow-100 text-yellow-800 dark:bg-yellow-900 dark:text-yellow-200 rounded text-xs font-medium">{{ requiredField }}</span>
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                    
+                    <!-- Definitions (Swagger 2.0) -->
+                    <div v-if="parsedSchema.definitions">
+                      <h4 class="font-medium text-gray-700 dark:text-gray-300 mb-3">Definitions</h4>
+                      <div class="space-y-3">
+                        <div v-for="(schema, name) in parsedSchema.definitions" :key="name" class="border border-gray-200 dark:border-gray-700 rounded-lg">
+                          <div 
+                            class="flex items-center justify-between p-3 bg-gray-50 dark:bg-gray-800 cursor-pointer hover:bg-gray-100 dark:hover:bg-gray-700"
+                            @click="toggleComponentExpansion(name)"
+                          >
+                            <div class="flex items-center gap-3">
+                              <i :class="isComponentExpanded(name) ? 'pi pi-chevron-down' : 'pi pi-chevron-right'" class="text-gray-500"></i>
+                              <span class="font-medium text-gray-900 dark:text-gray-100">{{ name }}</span>
+                              <span class="px-2 py-1 bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-200 rounded text-xs">{{ formatSchemaType(schema) }}</span>
+                            </div>
+                            <div class="flex items-center gap-2 text-xs text-gray-500">
+                              <span v-if="schema.properties">{{ Object.keys(schema.properties).length }} properties</span>
+                              <span v-if="schema.required">{{ schema.required.length }} required</span>
+                            </div>
+                          </div>
+                          
+                          <div v-if="isComponentExpanded(name)" class="p-4 space-y-4">
+                            <div v-if="schema.description" class="text-sm text-gray-600 dark:text-gray-400 bg-gray-50 dark:bg-gray-800 p-3 rounded">
+                              {{ schema.description }}
+                            </div>
+                            
+                            <!-- Schema Type Info -->
+                            <div class="flex items-center gap-4 text-xs">
+                              <div v-if="schema.type">
+                                <span class="font-medium text-gray-600 dark:text-gray-400">Type:</span>
+                                <span class="ml-1 px-2 py-1 bg-gray-100 dark:bg-gray-700 rounded">{{ schema.type }}</span>
+                              </div>
+                              <div v-if="schema.format">
+                                <span class="font-medium text-gray-600 dark:text-gray-400">Format:</span>
+                                <span class="ml-1 px-2 py-1 bg-gray-100 dark:bg-gray-700 rounded">{{ schema.format }}</span>
+                              </div>
+                            </div>
+                            
+                            <!-- Properties -->
+                            <div v-if="schema.properties" class="space-y-3">
+                              <h5 class="font-medium text-gray-700 dark:text-gray-300">Properties</h5>
+                              <div class="space-y-2">
+                                <div v-for="(prop, propName) in schema.properties" :key="propName" class="border border-gray-200 dark:border-gray-600 rounded p-3">
+                                  <div class="flex items-center gap-2 mb-1">
+                                    <span class="font-medium text-gray-900 dark:text-gray-100">{{ propName }}</span>
+                                    <span class="px-2 py-1 bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-200 rounded text-xs">{{ formatSchemaType(prop) }}</span>
+                                    <span v-if="schema.required && schema.required.includes(propName)" class="px-2 py-1 bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200 rounded text-xs font-medium">required</span>
+                                    <span v-else class="px-2 py-1 bg-gray-100 text-gray-600 dark:bg-gray-700 dark:text-gray-400 rounded text-xs">optional</span>
+                                  </div>
+                                  <div v-if="prop.description" class="text-sm text-gray-600 dark:text-gray-400 mb-2">
+                                    {{ prop.description }}
+                                  </div>
+                                  <div class="flex items-center gap-4 text-xs">
+                                    <div v-if="prop.format">
+                                      <span class="font-medium text-gray-600 dark:text-gray-400">Format:</span>
+                                      <span class="ml-1 px-2 py-1 bg-gray-100 dark:bg-gray-700 rounded">{{ prop.format }}</span>
+                                    </div>
+                                    <div v-if="prop.example">
+                                      <span class="font-medium text-gray-600 dark:text-gray-400">Example:</span>
+                                      <code class="ml-1 bg-gray-100 dark:bg-gray-700 px-2 py-1 rounded">{{ prop.example }}</code>
+                                    </div>
+                                    <div v-if="prop.default">
+                                      <span class="font-medium text-gray-600 dark:text-gray-400">Default:</span>
+                                      <code class="ml-1 bg-gray-100 dark:bg-gray-700 px-2 py-1 rounded">{{ prop.default }}</code>
+                                    </div>
+                                  </div>
+                                  <div v-if="prop.enum" class="mt-2">
+                                    <div class="text-xs text-gray-500 dark:text-gray-400 mb-1">Enum values:</div>
+                                    <div class="flex flex-wrap gap-1">
+                                      <span v-for="enumValue in prop.enum" :key="enumValue" class="px-2 py-1 bg-gray-100 dark:bg-gray-700 text-gray-700 dark:text-gray-300 rounded text-xs">{{ enumValue }}</span>
+                                    </div>
+                                  </div>
+                                </div>
+                              </div>
+                            </div>
+                            
+                            <!-- Required Fields Summary -->
+                            <div v-if="schema.required && schema.required.length > 0" class="bg-yellow-50 dark:bg-yellow-900/20 p-3 rounded">
+                              <h6 class="font-medium text-yellow-800 dark:text-yellow-200 mb-2">Required Fields</h6>
+                              <div class="flex flex-wrap gap-2">
+                                <span v-for="requiredField in schema.required" :key="requiredField" class="px-2 py-1 bg-yellow-100 text-yellow-800 dark:bg-yellow-900 dark:text-yellow-200 rounded text-xs font-medium">{{ requiredField }}</span>
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </template>
+              </Card>
             </div>
           </TabPanel>
 
@@ -1083,6 +1890,9 @@ const clearQuery = () => {
                               
                               <!-- Response Time -->
                               <span class="text-sm">{{ formatResponseTime(data.responseTime) }}</span>
+                              
+                              <!-- Response Size -->
+                              <span class="text-sm text-gray-600 dark:text-gray-400">{{ getResponseSize(data.response) }}</span>
                             </div>
                             
                             <!-- Expand/Collapse Icon -->
@@ -1143,6 +1953,10 @@ const clearQuery = () => {
                                 <div>
                                   <span class="font-medium">Response Time:</span>
                                   <span class="ml-2">{{ formatResponseTime(data.responseTime) }}</span>
+                                </div>
+                                <div>
+                                  <span class="font-medium">Response Size:</span>
+                                  <span class="ml-2">{{ getResponseSize(data.response) }}</span>
                                 </div>
                                 <div v-if="data.error">
                                   <span class="font-medium text-red-600">Error:</span>

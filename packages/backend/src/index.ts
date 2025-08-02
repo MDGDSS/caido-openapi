@@ -7,7 +7,8 @@ declare global {
 }
 
 interface OpenAPISchema {
-  openapi: string;
+  openapi?: string;
+  swagger?: string;
   info: {
     title: string;
     version: string;
@@ -17,6 +18,7 @@ interface OpenAPISchema {
   components?: {
     schemas?: Record<string, any>;
   };
+  definitions?: Record<string, any>; // For Swagger 2.0
 }
 
 interface TestCase {
@@ -46,6 +48,8 @@ interface TestOptions {
   headers?: Record<string, string>;
   workers?: number;
   delayBetweenRequests?: number;
+  parsedSchema?: OpenAPISchema; // For generating example values
+  useParameterFromDefinition?: boolean; // Whether to use example values from schema
 }
 
 const parseOpenAPISchema = (sdk: SDK, schemaText: string): OpenAPISchema => {
@@ -119,6 +123,232 @@ const getExpectedStatus = (operation: any): number => {
   return 200;
 };
 
+// Generate example value for schema (like Swagger UI)
+const generateExampleValue = (schema: any, depth: number = 0, parsedSchema?: OpenAPISchema): any => {
+  // Only stop recursion for circular references, not for legitimate nested structures
+  if (depth > 10) return '...'; // Much higher limit for complex schemas
+  
+  // Handle $ref
+  if (schema.$ref) {
+    const refName = schema.$ref.split('/').pop();
+    // Try to find the referenced schema
+    let refSchema;
+    if (parsedSchema?.components?.schemas?.[refName]) {
+      refSchema = parsedSchema.components.schemas[refName];
+    } else if (parsedSchema?.definitions?.[refName]) {
+      refSchema = parsedSchema.definitions[refName];
+    }
+    if (refSchema) {
+      return generateExampleValue(refSchema, depth + 1, parsedSchema);
+    }
+    return `{${refName}}`;
+  }
+  
+  // Handle basic types
+  if (schema.type) {
+    switch (schema.type) {
+      case 'string':
+        if (schema.format === 'date-time') return '2025-08-02T16:56:40.491Z';
+        if (schema.format === 'date') return '2025-08-02';
+        if (schema.format === 'email') return 'user@example.com';
+        if (schema.enum) return schema.enum[0];
+        if (schema.example) return schema.example;
+        return 'string';
+      case 'integer':
+      case 'number':
+        if (schema.example) return schema.example;
+        if (schema.default) return schema.default;
+        return 0;
+      case 'boolean':
+        if (schema.example) return schema.example;
+        return true;
+      case 'array':
+        if (schema.items) {
+          const itemExample = generateExampleValue(schema.items, depth + 1, parsedSchema);
+          // Always return an array with at least one item, even if it's just the example
+          return [itemExample];
+        }
+        return [];
+      case 'object':
+        if (schema.properties) {
+          const obj: any = {};
+          for (const [propName, propSchema] of Object.entries(schema.properties)) {
+            obj[propName] = generateExampleValue(propSchema as any, depth + 1, parsedSchema);
+          }
+          return obj;
+        }
+        if (schema.additionalProperties) {
+          // For additionalProperties, generate a more realistic example object
+          // instead of just a single "additionalProperty" key
+          const additionalPropType = generateExampleValue(schema.additionalProperties, depth + 1, parsedSchema);
+          return {
+            'id': typeof additionalPropType === 'number' ? 1 : 'example',
+            'name': typeof additionalPropType === 'string' ? 'example' : 'Example Name',
+            'value': additionalPropType,
+            'enabled': typeof additionalPropType === 'boolean' ? true : false
+          };
+        }
+        return {};
+    }
+  }
+  
+  // Handle enums
+  if (schema.enum) {
+    return schema.enum[0];
+  }
+  
+  // Handle examples
+  if (schema.example) {
+    return schema.example;
+  }
+  
+  return 'example';
+};
+
+// Generate request body from schema parameters
+const generateRequestBodyFromSchema = (testCase: TestCase, parsedSchema: OpenAPISchema): any => {
+  // For OpenAPI 3.x requestBody
+  if (testCase.requestBody?.content) {
+    const content = testCase.requestBody.content;
+    const mediaType = Object.keys(content)[0] || 'application/json';
+    const schema = content[mediaType]?.schema;
+    if (schema) {
+      // For OpenAPI 3.x, use the schema as-is unless it's very generic
+      if (schema.type === 'object' && 
+          schema.additionalProperties && 
+          !schema.properties &&
+          !schema.$ref) {
+        // Only use smart detection for truly generic schemas
+        const possibleDefinitions = findPossibleObjectDefinitions({ schema }, parsedSchema, testCase);
+        if (possibleDefinitions.length > 0) {
+          return generateExampleValue(possibleDefinitions[0], 0, parsedSchema);
+        }
+      }
+      return generateExampleValue(schema, 0, parsedSchema);
+    }
+  }
+  
+  // For Swagger 2.0 parameters with body
+  if (testCase.parameters) {
+    for (const param of testCase.parameters) {
+      if (param.in === 'body' && param.schema) {
+        // Check if this is a very generic object with only additionalProperties
+        // Only use smart detection for truly generic schemas
+        if (param.schema.type === 'object' && 
+            param.schema.additionalProperties && 
+            !param.schema.properties &&
+            !param.schema.$ref) {
+          // Look for object definitions that might match this parameter
+          const possibleDefinitions = findPossibleObjectDefinitions(param, parsedSchema, testCase);
+          if (possibleDefinitions.length > 0) {
+            // Use the first matching definition
+            return generateExampleValue(possibleDefinitions[0], 0, parsedSchema);
+          }
+        }
+        return generateExampleValue(param.schema, 0, parsedSchema);
+      }
+    }
+  }
+  
+  return null;
+};
+
+// Find possible object definitions that might match a generic parameter
+const findPossibleObjectDefinitions = (param: any, parsedSchema: OpenAPISchema, testCase: TestCase): any[] => {
+  const definitions = parsedSchema.definitions || {};
+  const schemas = parsedSchema.components?.schemas || {};
+  
+  // Look for definitions that have properties (not just additionalProperties)
+  const candidates: any[] = [];
+  
+  // First, try to find definitions that might be referenced by the parameter
+  if (param.schema && param.schema.$ref) {
+    const refName = param.schema.$ref.split('/').pop();
+    const refSchema = definitions[refName] || schemas[refName];
+    if (refSchema && refSchema.properties && Object.keys(refSchema.properties).length > 0) {
+      candidates.push(refSchema);
+      return candidates; // Return immediately if we found a direct reference
+    }
+  }
+  
+  // If no specific reference found, look for definitions that might match the endpoint context
+  // Try to find definitions that contain keywords from the test case path or name
+  const pathKeywords = testCase.path.toLowerCase().split(/[\/\-_]/).filter(k => k.length > 2);
+  const nameKeywords = testCase.name.toLowerCase().split(/[\s\-_]/).filter(k => k.length > 2);
+  const allKeywords = [...pathKeywords, ...nameKeywords];
+  
+  // Check definitions (Swagger 2.0)
+  for (const [name, def] of Object.entries(definitions)) {
+    if (def && typeof def === 'object' && def.properties && Object.keys(def.properties).length > 0) {
+      // Check if the definition name contains any keywords from the endpoint
+      const nameLower = name.toLowerCase();
+      const hasMatchingKeyword = allKeywords.some(keyword => nameLower.includes(keyword));
+      
+      if (hasMatchingKeyword) {
+        candidates.push(def);
+      }
+    }
+  }
+  
+  // Check schemas (OpenAPI 3.x)
+  for (const [name, schema] of Object.entries(schemas)) {
+    if (schema && typeof schema === 'object' && schema.properties && Object.keys(schema.properties).length > 0) {
+      // Check if the schema name contains any keywords from the endpoint
+      const nameLower = name.toLowerCase();
+      const hasMatchingKeyword = allKeywords.some(keyword => nameLower.includes(keyword));
+      
+      if (hasMatchingKeyword) {
+        candidates.push(schema);
+      }
+    }
+  }
+  
+  // If no contextual matches found, fall back to all definitions but prioritize by relevance
+  if (candidates.length === 0) {
+    // Instead of using all definitions, let's be more selective
+    // Look for definitions that might be related to the HTTP method or common patterns
+    const methodKeywords = [testCase.method.toLowerCase()];
+    if (testCase.method === 'POST') methodKeywords.push('create', 'add', 'new');
+    if (testCase.method === 'PUT') methodKeywords.push('update', 'modify', 'edit');
+    if (testCase.method === 'DELETE') methodKeywords.push('delete', 'remove');
+    
+    for (const [name, def] of Object.entries(definitions)) {
+      if (def && typeof def === 'object' && def.properties && Object.keys(def.properties).length > 0) {
+        const nameLower = name.toLowerCase();
+        const hasMethodKeyword = methodKeywords.some(keyword => nameLower.includes(keyword));
+        
+        if (hasMethodKeyword) {
+          candidates.push(def);
+        }
+      }
+    }
+    
+    // If still no matches, use the first few definitions but avoid the most generic ones
+    if (candidates.length === 0) {
+      const allDefs = Object.entries(definitions)
+        .filter(([name, def]) => def && typeof def === 'object' && def.properties && Object.keys(def.properties).length > 0)
+        .sort((a, b) => Object.keys(b[1].properties).length - Object.keys(a[1].properties).length);
+      
+      // Take the first 3 most detailed definitions
+      for (let i = 0; i < Math.min(3, allDefs.length); i++) {
+        const entry = allDefs[i];
+        if (entry && entry[1]) {
+          candidates.push(entry[1]);
+        }
+      }
+    }
+  }
+  
+  // Sort by number of properties (prefer more detailed objects)
+  candidates.sort((a, b) => {
+    const aProps = Object.keys(a.properties || {}).length;
+    const bProps = Object.keys(b.properties || {}).length;
+    return bProps - aProps;
+  });
+  
+  return candidates;
+};
+
 const executeTest = async (sdk: SDK, testCase: TestCase, options: TestOptions, pathVariableValues?: Record<string, string>): Promise<TestResult> => {
   const startTime = Date.now();
   
@@ -160,9 +390,38 @@ const executeTest = async (sdk: SDK, testCase: TestCase, options: TestOptions, p
       spec.setHeader(key, value);
     });
 
-    // Add request body for POST/PUT requests
-    if (testCase.requestBody && (testCase.method === 'POST' || testCase.method === 'PUT')) {
-      spec.setBody(JSON.stringify(testCase.requestBody));
+    // Add request body and Content-Length for POST/PUT/PATCH requests
+    let requestBodyString = '';
+    if (testCase.method === 'POST' || testCase.method === 'PUT' || testCase.method === 'PATCH') {
+      // Generate request body from schema if available
+      let requestBody = testCase.requestBody;
+      
+      // If we have a parsed schema and useParameterFromDefinition is enabled, try to generate example values
+      if (options.parsedSchema && options.useParameterFromDefinition !== false) {
+        const generatedBody = generateRequestBodyFromSchema(testCase, options.parsedSchema);
+        if (generatedBody) {
+          requestBody = generatedBody;
+          sdk.console.log(`Generated request body for ${testCase.method} ${testCase.path}:`, JSON.stringify(requestBody, null, 2));
+        }
+      }
+      
+      // Set request body if available
+      if (requestBody) {
+        requestBodyString = JSON.stringify(requestBody);
+        spec.setBody(requestBodyString);
+      } else {
+        // For POST/PUT/PATCH without body, use empty string
+        requestBodyString = '';
+        spec.setBody('');
+      }
+    }
+
+    // Add Content-Length header for POST/PUT/PATCH requests (after all other headers)
+    if (testCase.method === 'POST' || testCase.method === 'PUT' || testCase.method === 'PATCH') {
+      const contentLength = requestBodyString.length;
+      spec.setHeader('Content-Length', contentLength.toString());
+      
+      sdk.console.log(`Added Content-Length header: ${contentLength} for ${testCase.method} ${testCase.path}`);
     }
 
     // Send the request using Caido SDK
@@ -331,9 +590,11 @@ const generateTestCombinations = (testCase: TestCase, pathVariableValues?: Recor
     const variable = variables[index];
     const values = valuesPerVariable[index];
     
-    for (const value of values) {
-      current[variable] = value;
-      generateCombinations(current, index + 1);
+    if (variable && values) {
+      for (const value of values) {
+        current[variable] = value;
+        generateCombinations(current, index + 1);
+      }
     }
   };
   
@@ -390,8 +651,9 @@ const validateSchema = (sdk: SDK, schemaText: string): { valid: boolean; errors:
   try {
     const schema = JSON.parse(schemaText);
     
-    if (!schema.openapi) {
-      errors.push("Missing 'openapi' version field");
+    // Check for OpenAPI or Swagger version field
+    if (!schema.openapi && !schema.swagger) {
+      errors.push("Missing 'openapi' or 'swagger' version field");
     }
     
     if (!schema.info) {
