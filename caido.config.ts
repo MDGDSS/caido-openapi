@@ -12,7 +12,7 @@ export default defineConfig({
   id,
   name: "OpenAPI Tester",
   description: "Automated OpenAPI schema testing and validation",
-  version: "1.1.0",
+  version: "1.2.0",
   author: {
     name: "xvffdos",
     email: "dev@xvffdos.com",
