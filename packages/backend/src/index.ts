@@ -178,15 +178,33 @@ const generateExampleValue = (schema: any, depth: number = 0, parsedSchema?: Ope
           return obj;
         }
         if (schema.additionalProperties) {
-          // For additionalProperties, generate a more realistic example object
-          // instead of just a single "additionalProperty" key
+          // For additionalProperties, generate a proper object with the correct type
           const additionalPropType = generateExampleValue(schema.additionalProperties, depth + 1, parsedSchema);
-          return {
-            'id': typeof additionalPropType === 'number' ? 1 : 'example',
-            'name': typeof additionalPropType === 'string' ? 'example' : 'Example Name',
-            'value': additionalPropType,
-            'enabled': typeof additionalPropType === 'boolean' ? true : false
-          };
+          
+          // Generate a realistic object with the correct additionalProperties type
+          if (Array.isArray(additionalPropType)) {
+            // If additionalProperties is an array type, create an object with array values
+            return {
+              'items': additionalPropType,
+              'data': additionalPropType,
+              'list': additionalPropType
+            };
+          } else if (typeof additionalPropType === 'object' && additionalPropType !== null) {
+            // If additionalProperties is an object type, create an object with object values
+            return {
+              'item1': additionalPropType,
+              'item2': additionalPropType,
+              'data': additionalPropType
+            };
+          } else {
+            // For primitive types, create an object with primitive values
+            return {
+              'id': typeof additionalPropType === 'number' ? 1 : 'example',
+              'name': typeof additionalPropType === 'string' ? 'example' : 'Example Name',
+              'value': additionalPropType,
+              'enabled': typeof additionalPropType === 'boolean' ? true : false
+            };
+          }
         }
         return {};
     }
@@ -393,7 +411,6 @@ const executeTest = async (sdk: SDK, testCase: TestCase, options: TestOptions, p
     // Add request body and Content-Length for POST/PUT/PATCH requests
     let requestBodyString = '';
     if (testCase.method === 'POST' || testCase.method === 'PUT' || testCase.method === 'PATCH') {
-      // Generate request body from schema if available
       let requestBody = testCase.requestBody;
       
       // If we have a parsed schema and useParameterFromDefinition is enabled, try to generate example values
