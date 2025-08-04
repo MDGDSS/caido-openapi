@@ -770,6 +770,34 @@ const testHttpRequest = async (sdk: SDK, url: string): Promise<{ success: boolea
   }
 };
 
+// Find test result in Caido's HTTP History and open it in native UI
+const openTestResultInCaido = async (sdk: SDK, testResult: TestResult, baseUrl: string): Promise<void> => {
+  try {
+    const url = baseUrl + testResult.testCase.path;
+    const method = testResult.testCase.method;
+    
+    // Create HTTPQL query to find the request
+    const query = `method.eq:"${method}" AND url.eq:"${url}"`;
+    
+    // Use Caido's search to find the request
+    const searchResults = await sdk.search.search(query);
+    
+    if (searchResults && searchResults.length > 0) {
+      // Get the most recent matching request
+      const request = searchResults[0];
+      
+      // Open the request in Caido's native request/response viewer
+      await sdk.navigation.navigateToRequest(request.id);
+      
+      sdk.console.log(`Opened test result in Caido UI: ${method} ${url}`);
+    } else {
+      sdk.console.log(`No matching request found in Caido history: ${method} ${url}`);
+    }
+  } catch (error) {
+    sdk.console.log(`Failed to open test result in Caido UI: ${error instanceof Error ? error.message : 'Unknown error'}`);
+  }
+};
+
 export type API = DefineAPI<{
   parseOpenAPISchema: typeof parseOpenAPISchema;
   generateTestCases: typeof generateTestCases;
@@ -780,6 +808,7 @@ export type API = DefineAPI<{
   validateSchema: typeof validateSchema;
   getSchemaInfo: typeof getSchemaInfo;
   testHttpRequest: typeof testHttpRequest;
+  openTestResultInCaido: typeof openTestResultInCaido;
 }>;
 
 export function init(sdk: SDK<API>) {
@@ -792,4 +821,5 @@ export function init(sdk: SDK<API>) {
   sdk.api.register("validateSchema", validateSchema);
   sdk.api.register("getSchemaInfo", getSchemaInfo);
   sdk.api.register("testHttpRequest", testHttpRequest);
+  sdk.api.register("openTestResultInCaido", openTestResultInCaido);
 }

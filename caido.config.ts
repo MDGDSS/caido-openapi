@@ -12,11 +12,11 @@ export default defineConfig({
   id,
   name: "OpenAPI Tester",
   description: "Automated OpenAPI schema testing and validation",
-  version: "1.2.1",
+  version: "1.2.3",
   author: {
     name: "xvffdos",
     email: "dev@xvffdos.com",
-    url: "https://xvffdos.com",
+    url: "https://github.com/MDGDSS/caido-openapi",
   },
   plugins: [
     {

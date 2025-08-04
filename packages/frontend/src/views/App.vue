@@ -10,7 +10,7 @@ import Message from "primevue/message";
 import TabView from "primevue/tabview";
 import TabPanel from "primevue/tabpanel";
 import InputNumber from "primevue/inputnumber";
-import { ref, computed } from "vue";
+import { ref, computed, watch, nextTick } from "vue";
 
 import { useSDK } from "@/plugins/sdk";
 
@@ -37,6 +37,12 @@ const customHeaders = ref("");
 const variablesExpanded = ref(true);
 const stopTestRequested = ref(false);
 const expandedResults = ref<Set<string>>(new Set());
+const requestResponseTab = ref('request');
+const requestEditor = ref<any>(null);
+const responseEditor = ref<any>(null);
+const currentExpandedId = ref<string | null>(null);
+const requestEditorContainers = ref<Map<string, HTMLElement>>(new Map());
+const responseEditorContainers = ref<Map<string, HTMLElement>>(new Map());
 
 // HTTPQL state
 const httpqlQuery = ref("");
@@ -194,7 +200,7 @@ const loadSchema = async () => {
         pathVariableValues.value[variable] = [''];
       });
       
-      console.log(`Loaded schema with ${cases.length} test cases and ${allPathVariables.size} path variables`);
+
     }
   } catch (error) {
     console.error("Failed to load schema:", error);
@@ -444,6 +450,196 @@ const getResponseLength = (response: any) => {
   }
 };
 
+const getHostFromUrl = (url: string): string => {
+  try {
+    // Remove protocol if present
+    const urlWithoutProtocol = url.replace(/^https?:\/\//, '');
+    // Get everything before the first slash or colon
+    const host = urlWithoutProtocol.split(/[/:]/)[0];
+    return host || 'localhost';
+  } catch (error) {
+    return 'localhost';
+  }
+};
+
+const setRequestEditorContainer = (el: HTMLElement | null, resultId: string) => {
+  if (el) {
+    requestEditorContainers.value.set(resultId, el);
+  }
+};
+
+const setResponseEditorContainer = (el: HTMLElement | null, resultId: string) => {
+  if (el) {
+    responseEditorContainers.value.set(resultId, el);
+  }
+};
+
+const createNativeCaidoEditors = (testResult: any) => {
+  try {
+    const resultId = getResultId(testResult);
+    
+    // Get the containers for this specific result
+    const requestContainer = requestEditorContainers.value.get(resultId);
+    const responseContainer = responseEditorContainers.value.get(resultId);
+    
+    // Wait a bit for containers to be available
+    if (!requestContainer || !responseContainer) {
+      setTimeout(() => createNativeCaidoEditors(testResult), 100);
+      return;
+    }
+    
+    // Ensure containers are empty before creating new editors
+    requestContainer.innerHTML = '';
+    responseContainer.innerHTML = '';
+
+    // Create request editor
+    if (requestContainer) {
+      const requestContent = formatRequestForCaido(testResult);
+      
+      try {
+        // Try different possible SDK method names
+        let requestEditorInstance;
+        if (sdk.ui.httpRequestEditor) {
+          requestEditorInstance = sdk.ui.httpRequestEditor();
+        } else if (sdk.ui.createHttpRequestEditor) {
+          requestEditorInstance = sdk.ui.createHttpRequestEditor();
+        } else if (sdk.ui.requestEditor) {
+          requestEditorInstance = sdk.ui.requestEditor();
+        } else {
+          return;
+        }
+        
+        requestEditor.value = requestEditorInstance;
+        const requestElement = requestEditor.value.getElement();
+        requestContainer.appendChild(requestElement);
+        
+        // Set request content with delay to ensure editor is ready
+        setTimeout(() => {
+          try {
+            const requestView = requestEditor.value?.getEditorView();
+            if (requestView) {
+              requestView.dispatch({
+                changes: {
+                  from: 0,
+                  to: requestView.state.doc.length,
+                  insert: requestContent,
+                },
+              });
+            }
+          } catch (e) {
+            // Silent fail
+          }
+        }, 200);
+      } catch (e) {
+        // Silent fail
+      }
+    }
+
+    // Create response editor
+    if (responseContainer) {
+      const responseContent = formatResponseForCaido(testResult);
+      
+      try {
+        // Try different possible SDK method names
+        let responseEditorInstance;
+        if (sdk.ui.httpResponseEditor) {
+          responseEditorInstance = sdk.ui.httpResponseEditor();
+        } else if (sdk.ui.createHttpResponseEditor) {
+          responseEditorInstance = sdk.ui.createHttpResponseEditor();
+        } else if (sdk.ui.responseEditor) {
+          responseEditorInstance = sdk.ui.responseEditor();
+        } else {
+          return;
+        }
+        
+        responseEditor.value = responseEditorInstance;
+        const responseElement = responseEditor.value.getElement();
+        responseContainer.appendChild(responseElement);
+        
+        // Set response content with delay to ensure editor is ready
+        setTimeout(() => {
+          try {
+            const responseView = responseEditor.value?.getEditorView();
+            if (responseView) {
+              responseView.dispatch({
+                changes: {
+                  from: 0,
+                  to: responseView.state.doc.length,
+                  insert: responseContent,
+                },
+              });
+            }
+          } catch (e) {
+            // Silent fail
+          }
+        }, 200);
+      } catch (e) {
+        // Silent fail
+      }
+    }
+  } catch (error) {
+    console.error('Failed to create native Caido editors:', error);
+  }
+};
+
+const formatRequestForCaido = (testResult: any): string => {
+  const { testCase, combination } = testResult;
+  const url = baseUrl.value + testCase.path;
+  
+  let request = `${testCase.method} ${testCase.path} HTTP/1.1\r\n`;
+  request += `Host: ${getHostFromUrl(baseUrl.value)}\r\n`;
+  request += `User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36\r\n`;
+  request += `Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8\r\n`;
+  request += `Accept-Language: en-US,en;q=0.9\r\n`;
+  request += `Accept-Encoding: gzip, deflate, br\r\n`;
+  request += `Connection: keep-alive\r\n`;
+  request += `Upgrade-Insecure-Requests: 1\r\n`;
+  
+  // Add path variables as headers
+  if (combination && Object.keys(combination).length > 0) {
+    Object.entries(combination).forEach(([key, value]) => {
+      request += `X-Path-Variable-${key}: ${value}\r\n`;
+    });
+  }
+  
+  request += '\r\n';
+  
+  // Add request body if present
+  if (testCase.requestBody) {
+    request += JSON.stringify(testCase.requestBody, null, 2);
+  }
+  
+  return request;
+};
+
+const formatResponseForCaido = (testResult: any): string => {
+  const { status, response, error } = testResult;
+  
+  let responseText = `HTTP/1.1 ${status}\r\n`;
+  responseText += `Content-Type: application/json\r\n`;
+  responseText += `Content-Length: ${getResponseLength(response)}\r\n`;
+  responseText += `Date: ${new Date().toUTCString()}\r\n`;
+  responseText += `Server: nginx/1.18.0\r\n`;
+  responseText += `Access-Control-Allow-Origin: *\r\n`;
+  responseText += `Access-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS\r\n`;
+  responseText += `Access-Control-Allow-Headers: Content-Type, Authorization\r\n`;
+  responseText += '\r\n';
+  
+  if (error) {
+    responseText += `Error: ${error}`;
+  } else if (response !== undefined && response !== null) {
+    if (typeof response === 'object') {
+      responseText += JSON.stringify(response, null, 2);
+    } else {
+      responseText += String(response);
+    }
+  } else {
+    responseText += 'No response body';
+  }
+  
+  return responseText;
+};
+
 const formatResponseBody = (response: any) => {
   try {
     if (typeof response === 'string') {
@@ -592,8 +788,11 @@ const toggleVariables = () => {
 
 const toggleResultExpansion = (resultId: string) => {
   if (expandedResults.value.has(resultId)) {
+    // If clicking on already expanded result, close it
     expandedResults.value.delete(resultId);
   } else {
+    // If expanding a new result, close all others first (only one expanded at a time)
+    expandedResults.value.clear();
     expandedResults.value.add(resultId);
   }
 };
@@ -748,6 +947,8 @@ const clearQuery = () => {
   filteredTestResults.value = [];
   isQueryActive.value = false;
 };
+
+
 
 // Schema definition viewer helper functions
 const togglePathExpansion = (path: string) => {
@@ -1003,6 +1204,77 @@ const formatExampleValue = (schema: any): string => {
     return '{}';
   }
 };
+
+// Watch for expanded results to create native Caido editors
+watch(expandedResults, (newExpanded) => {
+  
+  // Always clean up existing editors first
+  if (requestEditor.value) {
+    try {
+      // Try to remove from any container
+      for (const container of requestEditorContainers.value.values()) {
+        try {
+          container.removeChild(requestEditor.value.getElement());
+        } catch (e) {
+          // Element might already be removed
+        }
+      }
+    } catch (e) {
+      // Element might already be removed
+    }
+    requestEditor.value = null;
+  }
+  if (responseEditor.value) {
+    try {
+      // Try to remove from any container
+      for (const container of responseEditorContainers.value.values()) {
+        try {
+          container.removeChild(responseEditor.value.getElement());
+        } catch (e) {
+          // Element might already be removed
+        }
+      }
+    } catch (e) {
+      // Element might already be removed
+    }
+    responseEditor.value = null;
+  }
+  
+  // Clear all container contents to ensure clean state
+  for (const container of requestEditorContainers.value.values()) {
+    container.innerHTML = '';
+  }
+  for (const container of responseEditorContainers.value.values()) {
+    container.innerHTML = '';
+  }
+  
+  if (newExpanded.size > 0) {
+    // Since only one result can be expanded at a time, get the first (and only) one
+    const expandedId = Array.from(newExpanded)[0];
+    
+    // Find the test result in all available arrays
+    
+
+    
+    // Try to find the result in allTestResults, testResults, and filteredTestResults
+    let testResult = allTestResults.value.find(result => getResultId(result) === expandedId);
+    if (!testResult) {
+      testResult = testResults.value.find(result => getResultId(result) === expandedId);
+    }
+    if (!testResult) {
+      testResult = filteredTestResults.value.find(result => getResultId(result) === expandedId);
+    }
+    
+    if (testResult) {
+      // Use nextTick to ensure DOM is updated, then create editors
+      nextTick(() => {
+        setTimeout(() => {
+          createNativeCaidoEditors(testResult);
+        }, 100); // Increased delay to ensure DOM is fully ready
+      });
+    }
+  }
+}, { deep: true });
 </script>
 
 <template>
@@ -1916,68 +2188,16 @@ const formatExampleValue = (schema: any): string => {
                           </div>
                         </div>
                         
-                        <!-- Expandable Details -->
-                        <div v-if="isResultExpanded(getResultId(data))" class="border-t border-gray-200 dark:border-gray-700 p-4 bg-gray-50 dark:bg-gray-800">
-                          <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
-                            <!-- Request Details -->
-                            <div>
-                              <h4 class="font-medium text-gray-800 dark:text-gray-200 mb-2">Request</h4>
-                              <div class="space-y-2 text-sm">
-                                <div>
-                                  <span class="font-medium">URL:</span>
-                                  <code class="ml-2 bg-gray-100 dark:bg-gray-700 px-2 py-1 rounded">
-                                    {{ baseUrl }}{{ data.testCase.path }}
-                                  </code>
-                                </div>
-                                <div>
-                                  <span class="font-medium">Method:</span>
-                                  <span class="ml-2">{{ data.testCase.method }}</span>
-                                </div>
-                                <div v-if="data.combination && Object.keys(data.combination).length > 0">
-                                  <span class="font-medium">Path Variables:</span>
-                                  <div class="ml-2 mt-1">
-                                    <div v-for="(value, key) in data.combination" :key="key" class="text-xs">
-                                      {{ key }}: "{{ value }}"
-                                    </div>
-                                  </div>
-                                </div>
-                              </div>
+                        <!-- Native Caido Request/Response Viewer -->
+                        <div v-if="isResultExpanded(getResultId(data))" class="border-t border-gray-200 dark:border-gray-700 h-[600px]">
+                          <div class="flex h-full">
+                            <!-- Request Editor -->
+                            <div class="w-1/2 border-r border-gray-200 dark:border-gray-700">
+                              <div class="h-full" :ref="el => setRequestEditorContainer(el, getResultId(data))"></div>
                             </div>
-                            
-                            <!-- Response Details -->
-                            <div>
-                              <h4 class="font-medium text-gray-800 dark:text-gray-200 mb-2">Response</h4>
-                              <div class="space-y-2 text-sm">
-                                <div>
-                                  <span class="font-medium">Status:</span>
-                                  <span class="ml-2" :class="getStatusClass(data.success)">{{ data.status || 'N/A' }}</span>
-                                </div>
-                                <div>
-                                  <span class="font-medium">Response Time:</span>
-                                  <span class="ml-2">{{ formatResponseTime(data.responseTime) }}</span>
-                                </div>
-                                <div>
-                                  <span class="font-medium">Response Size:</span>
-                                  <span class="ml-2">{{ getResponseSize(data.response) }}</span>
-                                </div>
-                                <div v-if="data.error">
-                                  <span class="font-medium text-red-600">Error:</span>
-                                  <span class="ml-2 text-red-600">{{ data.error }}</span>
-                                </div>
-                                
-                                <!-- Remove Debug Info section -->
-                                <!-- Only show Response Body if present -->
-                                <div v-if="data.response !== undefined && data.response !== null">
-                                  <span class="font-medium">Response Body:</span>
-                                  <!-- JSON Response with highlighting -->
-                                  <pre v-if="isJSONResponse(data.response)" class="mt-2 text-sm bg-gray-900 dark:bg-gray-800 text-gray-100 p-3 rounded overflow-auto max-h-48 font-mono leading-relaxed border border-gray-600 select-text" v-html="formatResponseBodyWithHighlighting(data.response)"></pre>
-                                  <!-- XML/Text Response without highlighting -->
-                                  <pre v-else class="mt-2 text-sm bg-gray-900 dark:bg-gray-800 text-gray-100 p-3 rounded overflow-auto max-h-48 font-mono leading-relaxed border border-gray-600 select-text">{{ formatResponseBody(data.response) }}</pre>
-                                </div>
-                                <div v-else>
-                                  <span class="font-medium text-gray-500">No response body</span>
-                                </div>
-                              </div>
+                            <!-- Response Editor -->
+                            <div class="w-1/2">
+                              <div class="h-full" :ref="el => setResponseEditorContainer(el, getResultId(data))"></div>
                             </div>
                           </div>
                         </div>

@@ -18,6 +18,7 @@ export interface FrontendSDK {
     validateSchema: (schemaText: string) => Promise<{ valid: boolean; errors: string[] }>;
     getSchemaInfo: (schemaText: string) => Promise<{ title: string; version: string; description?: string; pathCount: number; methodCount: number }>;
     testHttpRequest: (url: string) => Promise<{ success: boolean; status: number; response: string }>;
+    openTestResultInCaido: (testResult: any, baseUrl: string) => Promise<void>;
     // Session management
     createSession: (name: string, schema: any, configuration: any) => Promise<any>;
     getSession: (id: string) => Promise<any>;
