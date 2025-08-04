@@ -776,13 +776,13 @@ const isComponentExpanded = (componentName: string) => {
 
 const getMethodColor = (method: string) => {
   const colors = {
-    get: 'bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200',
-    post: 'bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-200',
-    put: 'bg-yellow-100 text-yellow-800 dark:bg-yellow-900 dark:text-yellow-200',
-    delete: 'bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200',
-    patch: 'bg-purple-100 text-purple-800 dark:bg-purple-900 dark:text-purple-200'
+    get: 'bg-green-500 text-white dark:bg-green-600 dark:text-green-100',
+    post: 'bg-blue-500 text-white dark:bg-blue-600 dark:text-blue-100',
+    put: 'bg-orange-500 text-white dark:bg-orange-600 dark:text-orange-100',
+    delete: 'bg-red-500 text-white dark:bg-red-600 dark:text-red-100',
+    patch: 'bg-purple-500 text-white dark:bg-purple-600 dark:text-purple-100'
   };
-  return colors[method.toLowerCase() as keyof typeof colors] || 'bg-gray-100 text-gray-800 dark:bg-gray-900 dark:text-gray-200';
+  return colors[method.toLowerCase() as keyof typeof colors] || 'bg-gray-500 text-white dark:bg-gray-600 dark:text-gray-100';
 };
 
 const formatSchemaType = (schema: any) => {
@@ -1014,7 +1014,7 @@ const formatExampleValue = (schema: any): string => {
         <p class="text-sm text-gray-600 dark:text-gray-400 mt-1">
           Test your OpenAPI schemas with real HTTP requests
         </p>
-      </div>
+    </div>
       <div class="flex items-center gap-2">
         <Button 
           v-if="isSchemaLoaded && getUniquePathVariables().length > 0"
@@ -1024,7 +1024,7 @@ const formatExampleValue = (schema: any): string => {
           size="small"
           :icon="sidebarOpen ? 'pi pi-chevron-left' : 'pi pi-chevron-right'"
         />
-      </div>
+  </div>
     </div>
 
     <!-- Main Content Area -->
@@ -1069,7 +1069,7 @@ const formatExampleValue = (schema: any): string => {
                 >
                   <template #messageicon>
                     <i :class="validationResult.valid ? 'pi pi-check' : 'pi pi-exclamation-triangle'"></i>
-                  </template>
+</template>
                   <div>
                     <div class="font-semibold">
                       {{ validationResult.valid ? 'Schema is valid!' : 'Schema validation failed' }}
@@ -1218,33 +1218,25 @@ const formatExampleValue = (schema: any): string => {
 
                 <!-- Test Cases Table -->
                 <Card>
-                  <template #title>Generated Test Cases ({{ testCases.length }})</template>
+                  <template #title>Endpoints ({{ testCases.length }})</template>
                   <template #content>
                                          <DataTable :value="testCases" stripedRows class="w-full" resizableColumns columnResizeMode="expand">
                        <Column field="method" header="Method" sortable resizable>
                          <template #body="{ data }">
-                           <div class="flex items-center gap-2">
-                             <span class="px-2 py-1 rounded text-xs font-medium" 
-                                   :class="{
-                                     'bg-blue-100 text-blue-800': data.method === 'GET',
-                                     'bg-green-100 text-green-800': data.method === 'POST',
-                                     'bg-yellow-100 text-yellow-800': data.method === 'PUT',
-                                     'bg-red-100 text-red-800': data.method === 'DELETE'
-                                   }">
-                               {{ data.method }}
-                             </span>
-                             <!-- Path Variables Indicator -->
-                             <div v-if="hasPathVariables(data)">
-                               <span class="text-xs text-blue-600 dark:text-blue-400 bg-blue-50 dark:bg-blue-900/20 px-2 py-1 rounded">
-                                 {{ data.pathVariables.length }} variable{{ data.pathVariables.length > 1 ? 's' : '' }}
-                               </span>
-                             </div>
-                           </div>
+                           <span class="px-2 py-1 rounded text-xs font-medium" 
+                                 :class="{
+                                   'bg-blue-100 text-blue-800': data.method === 'GET',
+                                   'bg-green-100 text-green-800': data.method === 'POST',
+                                   'bg-yellow-100 text-yellow-800': data.method === 'PUT',
+                                   'bg-red-100 text-red-800': data.method === 'DELETE'
+                                 }">
+                             {{ data.method }}
+                           </span>
                          </template>
                        </Column>
-                       <Column field="path" header="Path" sortable resizable style="width: 300px">
+                       <Column field="path" header="Path" sortable resizable class="path-column" style="width: 25vw !important; max-width: 25vw !important;">
                          <template #body="{ data }">
-                           <code class="text-sm bg-gray-100 dark:bg-gray-700 text-gray-900 dark:text-gray-100 px-2 py-1 rounded">{{ data.path }}</code>
+                           <code class="text-sm bg-gray-100 dark:bg-gray-700 text-gray-900 dark:text-gray-100 px-2 py-1 rounded whitespace-normal break-words">{{ data.path }}</code>
                          </template>
                        </Column>
                                              <Column header="Status" sortable resizable>
@@ -1370,9 +1362,9 @@ const formatExampleValue = (schema: any): string => {
                     <!-- Tags Information -->
                     <div v-if="parsedSchema.tags">
                       <h4 class="font-medium text-gray-700 dark:text-gray-300 mb-2">Tags</h4>
-                      <div class="space-y-2">
+                      <div class="flex flex-wrap gap-2">
                         <div v-for="tag in parsedSchema.tags" :key="tag.name" class="flex items-center gap-2">
-                          <span class="px-2 py-1 bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-200 text-xs rounded">{{ tag.name }}</span>
+                          <span class="px-3 py-1 bg-indigo-500 text-white dark:bg-indigo-600 dark:text-indigo-100 text-xs rounded-full font-medium shadow-sm">{{ tag.name }}</span>
                           <span v-if="tag.description" class="text-sm text-gray-600 dark:text-gray-400">{{ tag.description }}</span>
                         </div>
                       </div>
@@ -1401,7 +1393,15 @@ const formatExampleValue = (schema: any): string => {
                           <i :class="isPathExpanded(path) ? 'pi pi-chevron-down' : 'pi pi-chevron-right'" class="text-gray-500"></i>
                           <span class="font-mono text-sm font-medium text-gray-900 dark:text-gray-100">{{ path }}</span>
                         </div>
-                        <span class="text-xs text-gray-500">{{ Object.keys(methods).length }} methods</span>
+                        <div class="flex items-center gap-2">
+                          <div class="flex gap-1">
+                            <span v-for="method in Object.keys(methods)" :key="method" 
+                                  :class="['px-2 py-1 text-xs font-bold rounded', getMethodColor(method)]">
+                              {{ method.toUpperCase() }}
+                            </span>
+                          </div>
+                          <span class="text-xs text-gray-500">{{ Object.keys(methods).length }} methods</span>
+                        </div>
                       </div>
 
                       <!-- Path Methods -->
@@ -1409,7 +1409,7 @@ const formatExampleValue = (schema: any): string => {
                         <div v-for="(operation, method) in methods" :key="method" class="border-l-4 border-gray-200 dark:border-gray-600 pl-4">
                           <!-- Method Header -->
                           <div class="flex items-center gap-3 mb-3">
-                            <span :class="['px-2 py-1 text-xs font-semibold rounded', getMethodColor(method)]">
+                            <span :class="['px-3 py-1 text-sm font-bold rounded shadow-sm', getMethodColor(method)]">
                               {{ method.toUpperCase() }}
                             </span>
                             <h4 class="font-medium text-gray-900 dark:text-gray-100">
@@ -1427,7 +1427,9 @@ const formatExampleValue = (schema: any): string => {
                               </div>
                               <div v-if="operation.tags && operation.tags.length > 0">
                                 <span class="font-medium text-gray-600 dark:text-gray-400">Tags:</span>
-                                <span v-for="tag in operation.tags" :key="tag" class="ml-1 px-2 py-1 bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-200 rounded text-xs">{{ tag }}</span>
+                                <div class="flex flex-wrap gap-1 mt-1">
+                                  <span v-for="tag in operation.tags" :key="tag" class="px-2 py-1 bg-emerald-500 text-white dark:bg-emerald-600 dark:text-emerald-100 rounded text-xs font-medium">{{ tag }}</span>
+                                </div>
                               </div>
                             </div>
 
@@ -1454,10 +1456,10 @@ const formatExampleValue = (schema: any): string => {
                                 <div v-for="param in operation.parameters" :key="param.name" class="border border-gray-200 dark:border-gray-600 rounded p-3">
                                   <div class="flex items-center gap-2 mb-1">
                                     <span class="font-mono text-gray-900 dark:text-gray-100 font-medium">{{ param.name }}</span>
-                                    <span class="px-2 py-1 bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-400 rounded text-xs">{{ param.in }}</span>
-                                    <span v-if="param.required" class="px-2 py-1 bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200 rounded text-xs font-medium">required</span>
-                                    <span v-else class="px-2 py-1 bg-gray-100 text-gray-600 dark:bg-gray-700 dark:text-gray-400 rounded text-xs">optional</span>
-                                    <span v-if="param.schema" class="px-2 py-1 bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-200 rounded text-xs">{{ formatSchemaType(param.schema) }}</span>
+                                    <span class="px-2 py-1 bg-cyan-500 text-white dark:bg-cyan-600 dark:text-cyan-100 rounded text-xs font-medium">{{ param.in }}</span>
+                                    <span v-if="param.required" class="px-2 py-1 bg-red-500 text-white dark:bg-red-600 dark:text-red-100 rounded text-xs font-medium">required</span>
+                                    <span v-else class="px-2 py-1 bg-gray-500 text-white dark:bg-gray-600 dark:text-gray-100 rounded text-xs font-medium">optional</span>
+                                    <span v-if="param.schema" class="px-2 py-1 bg-blue-500 text-white dark:bg-blue-600 dark:text-blue-100 rounded text-xs font-medium">{{ formatSchemaType(param.schema) }}</span>
                                   </div>
                                   <div v-if="param.description" class="text-gray-600 dark:text-gray-400 text-xs">
                                     {{ param.description }}
@@ -1487,7 +1489,7 @@ const formatExampleValue = (schema: any): string => {
                                         <div class="space-y-1 pl-2">
                                           <div v-for="(prop, propName) in param.schema.properties" :key="propName" class="flex items-center gap-2 text-xs">
                                             <span class="font-mono text-gray-700 dark:text-gray-300 font-medium">{{ propName }}</span>
-                                            <span class="px-1 py-0.5 bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-200 rounded">{{ formatSchemaType(prop) }}</span>
+                                            <span class="px-2 py-1 bg-blue-500 text-white dark:bg-blue-600 dark:text-blue-100 rounded font-medium">{{ formatSchemaType(prop) }}</span>
                                             <span v-if="prop.description" class="text-gray-500">- {{ prop.description }}</span>
                                             <span v-if="prop.example" class="text-gray-400">(example: {{ prop.example }})</span>
                                             <span v-if="prop.default" class="text-gray-400">(default: {{ prop.default }})</span>
@@ -1509,7 +1511,7 @@ const formatExampleValue = (schema: any): string => {
                                     <div class="space-y-1 pl-2">
                                       <div v-for="(prop, propName) in param.schema.properties" :key="propName" class="flex items-center gap-2">
                                         <span class="font-mono text-gray-700 dark:text-gray-300">{{ propName }}</span>
-                                        <span class="text-blue-500">{{ formatSchemaType(prop) }}</span>
+                                        <span class="px-2 py-1 bg-blue-500 text-white dark:bg-blue-600 dark:text-blue-100 rounded text-xs font-medium">{{ formatSchemaType(prop) }}</span>
                                         <span v-if="prop.description" class="text-gray-500">- {{ prop.description }}</span>
                                       </div>
                                     </div>
@@ -1523,8 +1525,8 @@ const formatExampleValue = (schema: any): string => {
                               <h5 class="font-medium text-gray-700 dark:text-gray-300 mb-2">Request Body</h5>
                               <div class="border border-gray-200 dark:border-gray-600 rounded p-3">
                                 <div v-if="operation.requestBody.required !== undefined" class="mb-2">
-                                  <span v-if="operation.requestBody.required" class="px-2 py-1 bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200 rounded text-xs font-medium">required</span>
-                                  <span v-else class="px-2 py-1 bg-gray-100 text-gray-600 dark:bg-gray-700 dark:text-gray-400 rounded text-xs">optional</span>
+                                  <span v-if="operation.requestBody.required" class="px-2 py-1 bg-red-500 text-white dark:bg-red-600 dark:text-red-100 rounded text-xs font-medium">required</span>
+                                  <span v-else class="px-2 py-1 bg-gray-500 text-white dark:bg-gray-600 dark:text-gray-100 rounded text-xs font-medium">optional</span>
                                 </div>
                                 <div v-if="operation.requestBody.content">
                                   <div v-for="(content, mediaType) in operation.requestBody.content" :key="mediaType" class="mb-3">
@@ -1547,7 +1549,7 @@ const formatExampleValue = (schema: any): string => {
                                       <div v-if="content.schema.properties" class="space-y-1 pl-2">
                                         <div v-for="(prop, propName) in content.schema.properties" :key="propName" class="flex items-center gap-2">
                                           <span class="font-mono text-gray-700 dark:text-gray-300">{{ propName }}</span>
-                                          <span class="text-blue-500">{{ formatSchemaType(prop) }}</span>
+                                          <span class="px-2 py-1 bg-blue-500 text-white dark:bg-blue-600 dark:text-blue-100 rounded text-xs font-medium">{{ formatSchemaType(prop) }}</span>
                                           <span v-if="prop.description" class="text-gray-500">- {{ prop.description }}</span>
                                         </div>
                                       </div>
@@ -1618,7 +1620,7 @@ const formatExampleValue = (schema: any): string => {
                             <div class="flex items-center gap-3">
                               <i :class="isComponentExpanded(name) ? 'pi pi-chevron-down' : 'pi pi-chevron-right'" class="text-gray-500"></i>
                               <span class="font-medium text-gray-900 dark:text-gray-100">{{ name }}</span>
-                              <span class="px-2 py-1 bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-200 rounded text-xs">{{ formatSchemaType(schema) }}</span>
+                              <span class="px-2 py-1 bg-blue-500 text-white dark:bg-blue-600 dark:text-blue-100 rounded text-xs font-medium">{{ formatSchemaType(schema) }}</span>
                             </div>
                             <div class="flex items-center gap-2 text-xs text-gray-500">
                               <span v-if="schema.properties">{{ Object.keys(schema.properties).length }} properties</span>
@@ -1654,9 +1656,9 @@ const formatExampleValue = (schema: any): string => {
                                 <div v-for="(prop, propName) in schema.properties" :key="propName" class="border border-gray-200 dark:border-gray-600 rounded p-3">
                                   <div class="flex items-center gap-2 mb-1">
                                     <span class="font-medium text-gray-900 dark:text-gray-100">{{ propName }}</span>
-                                    <span class="px-2 py-1 bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-200 rounded text-xs">{{ formatSchemaType(prop) }}</span>
-                                    <span v-if="schema.required && schema.required.includes(propName)" class="px-2 py-1 bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200 rounded text-xs font-medium">required</span>
-                                    <span v-else class="px-2 py-1 bg-gray-100 text-gray-600 dark:bg-gray-700 dark:text-gray-400 rounded text-xs">optional</span>
+                                    <span class="px-2 py-1 bg-blue-500 text-white dark:bg-blue-600 dark:text-blue-100 rounded text-xs font-medium">{{ formatSchemaType(prop) }}</span>
+                                    <span v-if="schema.required && schema.required.includes(propName)" class="px-2 py-1 bg-red-500 text-white dark:bg-red-600 dark:text-red-100 rounded text-xs font-medium">required</span>
+                                    <span v-else class="px-2 py-1 bg-gray-500 text-white dark:bg-gray-600 dark:text-gray-100 rounded text-xs font-medium">optional</span>
                                   </div>
                                   <div v-if="prop.description" class="text-sm text-gray-600 dark:text-gray-400 mb-2">
                                     {{ prop.description }}
@@ -1709,7 +1711,7 @@ const formatExampleValue = (schema: any): string => {
                             <div class="flex items-center gap-3">
                               <i :class="isComponentExpanded(name) ? 'pi pi-chevron-down' : 'pi pi-chevron-right'" class="text-gray-500"></i>
                               <span class="font-medium text-gray-900 dark:text-gray-100">{{ name }}</span>
-                              <span class="px-2 py-1 bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-200 rounded text-xs">{{ formatSchemaType(schema) }}</span>
+                              <span class="px-2 py-1 bg-blue-500 text-white dark:bg-blue-600 dark:text-blue-100 rounded text-xs font-medium">{{ formatSchemaType(schema) }}</span>
                             </div>
                             <div class="flex items-center gap-2 text-xs text-gray-500">
                               <span v-if="schema.properties">{{ Object.keys(schema.properties).length }} properties</span>
@@ -1741,9 +1743,9 @@ const formatExampleValue = (schema: any): string => {
                                 <div v-for="(prop, propName) in schema.properties" :key="propName" class="border border-gray-200 dark:border-gray-600 rounded p-3">
                                   <div class="flex items-center gap-2 mb-1">
                                     <span class="font-medium text-gray-900 dark:text-gray-100">{{ propName }}</span>
-                                    <span class="px-2 py-1 bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-200 rounded text-xs">{{ formatSchemaType(prop) }}</span>
-                                    <span v-if="schema.required && schema.required.includes(propName)" class="px-2 py-1 bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200 rounded text-xs font-medium">required</span>
-                                    <span v-else class="px-2 py-1 bg-gray-100 text-gray-600 dark:bg-gray-700 dark:text-gray-400 rounded text-xs">optional</span>
+                                    <span class="px-2 py-1 bg-blue-500 text-white dark:bg-blue-600 dark:text-blue-100 rounded text-xs font-medium">{{ formatSchemaType(prop) }}</span>
+                                    <span v-if="schema.required && schema.required.includes(propName)" class="px-2 py-1 bg-red-500 text-white dark:bg-red-600 dark:text-red-100 rounded text-xs font-medium">required</span>
+                                    <span v-else class="px-2 py-1 bg-gray-500 text-white dark:bg-gray-600 dark:text-gray-100 rounded text-xs font-medium">optional</span>
                                   </div>
                                   <div v-if="prop.description" class="text-sm text-gray-600 dark:text-gray-400 mb-2">
                                     {{ prop.description }}
@@ -2069,6 +2071,7 @@ const formatExampleValue = (schema: any): string => {
 
 :deep(.p-datatable .p-datatable-thead > tr > th .p-column-resizer) {
   position: absolute;
+  border-left-color: white !important;
   right: 0;
   top: 0;
   width: 4px;
@@ -2123,5 +2126,33 @@ pre {
   -webkit-user-select: text !important;
   -moz-user-select: text !important;
   -ms-user-select: text !important;
+}
+
+/* Override PrimeVue default column widths for better resizing */
+:deep([data-pc-name="datatable"] [data-pc-section="tablecontainer"] table[data-pc-section="table"] thead[data-pc-section="thead"] tr th:nth-child(2)),
+:deep([data-pc-name="datatable"] [data-pc-section="tablecontainer"] table[data-pc-section="table"] tbody[data-pc-section="tbody"] tr td:nth-child(2)),
+:deep([data-pc-name="datatable"] [data-pc-section="tablecontainer"] table[data-pc-section="table"] tfoot[data-pc-section="tfoot"] tr td:nth-child(2)) {
+  width: 25vw !important;
+  max-width: 25vw !important;
+  min-width: 200px !important;
+}
+
+/* Allow resizing for all columns */
+:deep([data-pc-name="datatable"] [data-pc-section="tablecontainer"] table[data-pc-section="table"] thead[data-pc-section="thead"] tr th) {
+  min-width: 100px !important;
+  max-width: none !important;
+}
+
+/* Force path column width */
+:deep(.path-column) {
+  width: 25vw !important;
+  max-width: 25vw !important;
+  min-width: 200px !important;
+}
+
+:deep(.path-column .p-column-header-content),
+:deep(.path-column .p-column-body) {
+  width: 25vw !important;
+  max-width: 25vw !important;
 }
 </style>
