@@ -11,8 +11,8 @@ const id = "openapi-tester";
 export default defineConfig({
   id,
   name: "OpenAPI Tester",
-  description: "Automated OpenAPI schema testing and validation",
-  version: "1.2.3",
+  description: "OpenAPI schema testing and validation",
+  version: "1.2.4",
   author: {
     name: "xvffdos",
     email: "dev@xvffdos.com",

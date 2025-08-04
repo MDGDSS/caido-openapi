@@ -1,6 +1,6 @@
 {
   "name": "openapi-tester",
-  "version": "1.2.3",
+  "version": "1.2.4",
   "private": true,
   "scripts": {
     "typecheck": "pnpm -r typecheck",
