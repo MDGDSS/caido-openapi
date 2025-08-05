@@ -42,5 +42,7 @@ export const init = (sdk: FrontendSDK) => {
   });
 
   // Add a sidebar item
-  sdk.sidebar.registerItem("OpenAPI", "/openapi");
+  sdk.sidebar.registerItem("OpenAPI", "/openapi", {
+    icon: "fa-solid fa-vials",  // A changer un jour
+  });
 };
