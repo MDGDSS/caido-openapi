@@ -1,5 +1,6 @@
 {
-  "name": "openapi",
+  "id":"openapi",
+  "name": "OpenApi",
   "version": "1.0.1",
   "author":"xvffdos",
   "license":"MIT",
