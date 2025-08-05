@@ -210,14 +210,11 @@ const loadSchema = async () => {
       bodyVariableValues.value = {};
       cases.forEach(testCase => {
         if (testCase.bodyVariables) {
-          console.log(`Found body variables for ${testCase.name}:`, testCase.bodyVariables);
           Object.entries(testCase.bodyVariables).forEach(([key, value]) => {
             bodyVariableValues.value[key] = value;
           });
         }
       });
-      
-      console.log('Final bodyVariableValues:', bodyVariableValues.value);
       
 
     }
@@ -633,18 +630,11 @@ const formatRequestForCaido = (testResult: any): string => {
     let bodyToShow = testCase.requestBody;
     
     // First, try to get the actual body from the test result
-    console.log('formatRequestForCaido - testResult:', testResult);
-    console.log('formatRequestForCaido - testResult.actualBody:', testResult?.actualBody);
-    
     if (testResult && testResult.actualBody) {
       bodyToShow = testResult.actualBody;
-      console.log('Using actualBody from testResult:', bodyToShow);
     } else if (testCase.bodyVariables && Object.keys(testCase.bodyVariables).length > 0) {
       // Fallback to body variables if actual body not available
       bodyToShow = testCase.bodyVariables;
-      console.log('Using bodyVariables from testCase:', bodyToShow);
-    } else {
-      console.log('Using original requestBody:', bodyToShow);
     }
     
     request += JSON.stringify(bodyToShow, null, 2);
@@ -1608,18 +1598,7 @@ onMounted(() => {
                          When enabled, empty path variables will be filled with random strings instead of being left empty.
                        </p>
                        
-                       <div class="flex items-center gap-2">
-                         <input 
-                           type="checkbox" 
-                           id="useParameterFromDefinition"
-                           v-model="useParameterFromDefinition"
-                           class="w-4 h-4 text-blue-600 bg-gray-100 border-gray-300 rounded focus:ring-blue-500 focus:ring-2"
-                         />
-                         <label for="useParameterFromDefinition" class="text-sm font-medium">Use Parameter from Definition</label>
-                       </div>
-                       <p class="text-xs text-gray-500">
-                         When enabled, POST/PUT requests will use example values from the schema definition as request body.
-                       </p>
+
                      </div>
                     
                     <div class="mt-4 flex gap-2">
@@ -2463,7 +2442,7 @@ onMounted(() => {
             </div>
           </div>
           
-          <!-- Debug info -->
+          <!-- Debug info 
           <div class="border-t border-gray-200 dark:border-gray-700 pt-4 mt-4">
             <div class="mb-3">
               <h4 class="text-md font-medium text-gray-700 dark:text-gray-300">Debug Info</h4>
@@ -2472,7 +2451,7 @@ onMounted(() => {
               <p>Body Variables Count: {{ Object.keys(bodyVariableValues).length }}</p>
               <p>Body Variables: {{ JSON.stringify(bodyVariableValues) }}</p>
             </div>
-          </div>
+          </div> -->
         </div>
       </div>
     </div>
