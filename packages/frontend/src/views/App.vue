@@ -10,7 +10,7 @@ import Message from "primevue/message";
 import TabView from "primevue/tabview";
 import TabPanel from "primevue/tabpanel";
 import InputNumber from "primevue/inputnumber";
-import { ref, computed, watch, nextTick } from "vue";
+import { ref, computed, watch, nextTick, onMounted, onUnmounted } from "vue";
 
 import { useSDK } from "@/plugins/sdk";
 
@@ -31,6 +31,7 @@ const activeTab = ref(0);
 const testCases = ref<any[]>([]);
 const isSchemaLoaded = ref(false);
 const pathVariableValues = ref<Record<string, string[]>>({});
+const bodyVariableValues = ref<Record<string, any>>({});
 const runningTests = ref<Set<string>>(new Set());
 const sidebarOpen = ref(true);
 const customHeaders = ref("");
@@ -153,7 +154,12 @@ const allTestResults = computed(() => {
       results.push(tc.result);
     }
   });
-  return results;
+  // Sort by creation date (newest first)
+  return results.sort((a, b) => {
+    const timestampA = a.timestamp || 0;
+    const timestampB = b.timestamp || 0;
+    return timestampB - timestampA; // Newest first
+  });
 });
 
 // Methods
@@ -199,6 +205,19 @@ const loadSchema = async () => {
       allPathVariables.forEach(variable => {
         pathVariableValues.value[variable] = [''];
       });
+      
+      // Initialize body variable values
+      bodyVariableValues.value = {};
+      cases.forEach(testCase => {
+        if (testCase.bodyVariables) {
+          console.log(`Found body variables for ${testCase.name}:`, testCase.bodyVariables);
+          Object.entries(testCase.bodyVariables).forEach(([key, value]) => {
+            bodyVariableValues.value[key] = value;
+          });
+        }
+      });
+      
+      console.log('Final bodyVariableValues:', bodyVariableValues.value);
       
 
     }
@@ -253,14 +272,14 @@ const runAllTests = async () => {
       
       if (variableCombinations.length === 0) {
         // No path variables, run single test
-        const result = await sdk.backend.runSingleTest(testCase, baseUrl.value, options, {});
+        const result = await sdk.backend.runSingleTest(testCase, baseUrl.value, options, {}, bodyVariableValues.value);
         updateTestCaseResult(testCase, result);
       } else {
         // Run test for each combination
         for (const combination of variableCombinations) {
           if (stopTestRequested.value) break;
           
-          const result = await sdk.backend.runSingleTest(testCase, baseUrl.value, options, combination);
+          const result = await sdk.backend.runSingleTest(testCase, baseUrl.value, options, combination, bodyVariableValues.value);
           updateTestCaseResult(testCase, result, combination);
           
           // Add delay between requests if specified
@@ -280,6 +299,8 @@ const runAllTests = async () => {
     resetStopFlag(); // Reset stop flag when tests complete (whether stopped or finished)
   }
 };
+
+
 
 const runSingleTest = async (testCase: any) => {
   if (!baseUrl.value.trim()) {
@@ -304,7 +325,7 @@ const runSingleTest = async (testCase: any) => {
     
     if (variableCombinations.length === 0) {
       // No path variables or no values, run single test
-      const result = await sdk.backend.runSingleTest(testCase, baseUrl.value, options, {});
+      const result = await sdk.backend.runSingleTest(testCase, baseUrl.value, options, {}, bodyVariableValues.value);
       updateTestCaseResult(testCase, result);
     } else {
       // Run test for each combination
@@ -312,7 +333,7 @@ const runSingleTest = async (testCase: any) => {
         const combination = variableCombinations[i];
         if (stopTestRequested.value) break;
         
-        const result = await sdk.backend.runSingleTest(testCase, baseUrl.value, options, combination);
+        const result = await sdk.backend.runSingleTest(testCase, baseUrl.value, options, combination, bodyVariableValues.value);
         updateTestCaseResult(testCase, result, combination);
         
         // Add delay between requests if specified
@@ -388,6 +409,8 @@ const updateTestCaseResult = (testCase: any, result: any, combination?: Record<s
     if (!testCases.value[index].results) {
       testCases.value[index].results = [];
     }
+    
+
     
     // Add the result with combination info
     const resultWithCombination = {
@@ -494,6 +517,7 @@ const createNativeCaidoEditors = (testResult: any) => {
 
     // Create request editor
     if (requestContainer) {
+      requestContainer.classList.add('request-editor-container');
       const requestContent = formatRequestForCaido(testResult);
       
       try {
@@ -509,14 +533,13 @@ const createNativeCaidoEditors = (testResult: any) => {
           return;
         }
         
-        requestEditor.value = requestEditorInstance;
-        const requestElement = requestEditor.value.getElement();
+        const requestElement = requestEditorInstance.getElement();
         requestContainer.appendChild(requestElement);
         
         // Set request content with delay to ensure editor is ready
         setTimeout(() => {
           try {
-            const requestView = requestEditor.value?.getEditorView();
+            const requestView = requestEditorInstance?.getEditorView();
             if (requestView) {
               requestView.dispatch({
                 changes: {
@@ -537,6 +560,7 @@ const createNativeCaidoEditors = (testResult: any) => {
 
     // Create response editor
     if (responseContainer) {
+      responseContainer.classList.add('response-editor-container');
       const responseContent = formatResponseForCaido(testResult);
       
       try {
@@ -552,14 +576,13 @@ const createNativeCaidoEditors = (testResult: any) => {
           return;
         }
         
-        responseEditor.value = responseEditorInstance;
-        const responseElement = responseEditor.value.getElement();
+        const responseElement = responseEditorInstance.getElement();
         responseContainer.appendChild(responseElement);
         
         // Set response content with delay to ensure editor is ready
         setTimeout(() => {
           try {
-            const responseView = responseEditor.value?.getEditorView();
+            const responseView = responseEditorInstance?.getEditorView();
             if (responseView) {
               responseView.dispatch({
                 changes: {
@@ -584,9 +607,16 @@ const createNativeCaidoEditors = (testResult: any) => {
 
 const formatRequestForCaido = (testResult: any): string => {
   const { testCase, combination } = testResult;
-  const url = baseUrl.value + testCase.path;
   
-  let request = `${testCase.method} ${testCase.path} HTTP/1.1\r\n`;
+  // Replace path variables in the URL
+  let finalPath = testCase.path;
+  if (combination && Object.keys(combination).length > 0) {
+    Object.entries(combination).forEach(([key, value]) => {
+      finalPath = finalPath.replace(`{${key}}`, value);
+    });
+  }
+  
+  let request = `${testCase.method} ${finalPath} HTTP/1.1\r\n`;
   request += `Host: ${getHostFromUrl(baseUrl.value)}\r\n`;
   request += `User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36\r\n`;
   request += `Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8\r\n`;
@@ -595,18 +625,29 @@ const formatRequestForCaido = (testResult: any): string => {
   request += `Connection: keep-alive\r\n`;
   request += `Upgrade-Insecure-Requests: 1\r\n`;
   
-  // Add path variables as headers
-  if (combination && Object.keys(combination).length > 0) {
-    Object.entries(combination).forEach(([key, value]) => {
-      request += `X-Path-Variable-${key}: ${value}\r\n`;
-    });
-  }
-  
   request += '\r\n';
   
   // Add request body if present
   if (testCase.requestBody) {
-    request += JSON.stringify(testCase.requestBody, null, 2);
+    // Use the actual body that was sent, not the schema reference
+    let bodyToShow = testCase.requestBody;
+    
+    // First, try to get the actual body from the test result
+    console.log('formatRequestForCaido - testResult:', testResult);
+    console.log('formatRequestForCaido - testResult.actualBody:', testResult?.actualBody);
+    
+    if (testResult && testResult.actualBody) {
+      bodyToShow = testResult.actualBody;
+      console.log('Using actualBody from testResult:', bodyToShow);
+    } else if (testCase.bodyVariables && Object.keys(testCase.bodyVariables).length > 0) {
+      // Fallback to body variables if actual body not available
+      bodyToShow = testCase.bodyVariables;
+      console.log('Using bodyVariables from testCase:', bodyToShow);
+    } else {
+      console.log('Using original requestBody:', bodyToShow);
+    }
+    
+    request += JSON.stringify(bodyToShow, null, 2);
   }
   
   return request;
@@ -804,13 +845,24 @@ const isResultExpanded = (resultId: string) => {
 const getResultId = (data: any) => {
   // Create a unique ID for each result
   const baseId = `${data.testCase.name}-${data.testCase.method}-${data.testCase.path}`;
+  let resultId = baseId;
+  
   if (data.combination) {
     const combinationStr = Object.entries(data.combination)
       .map(([key, value]) => `${key}=${value}`)
       .join('-');
-    return `${baseId}-${combinationStr}`;
+    resultId = `${baseId}-${combinationStr}`;
   }
-  return baseId;
+  
+  // Add timestamp to make each execution unique
+  if (data.timestamp) {
+    resultId = `${resultId}-${data.timestamp}`;
+  } else {
+    // Fallback: use current timestamp if not available
+    resultId = `${resultId}-${Date.now()}`;
+  }
+  
+  return resultId;
 };
 
 const parseCustomHeaders = (): Record<string, string> => {
@@ -1208,38 +1260,6 @@ const formatExampleValue = (schema: any): string => {
 // Watch for expanded results to create native Caido editors
 watch(expandedResults, (newExpanded) => {
   
-  // Always clean up existing editors first
-  if (requestEditor.value) {
-    try {
-      // Try to remove from any container
-      for (const container of requestEditorContainers.value.values()) {
-        try {
-          container.removeChild(requestEditor.value.getElement());
-        } catch (e) {
-          // Element might already be removed
-        }
-      }
-    } catch (e) {
-      // Element might already be removed
-    }
-    requestEditor.value = null;
-  }
-  if (responseEditor.value) {
-    try {
-      // Try to remove from any container
-      for (const container of responseEditorContainers.value.values()) {
-        try {
-          container.removeChild(responseEditor.value.getElement());
-        } catch (e) {
-          // Element might already be removed
-        }
-      }
-    } catch (e) {
-      // Element might already be removed
-    }
-    responseEditor.value = null;
-  }
-  
   // Clear all container contents to ensure clean state
   for (const container of requestEditorContainers.value.values()) {
     container.innerHTML = '';
@@ -1275,6 +1295,139 @@ watch(expandedResults, (newExpanded) => {
     }
   }
 }, { deep: true });
+
+// Add keyboard shortcuts for Repeater and Replay
+const setupKeyboardShortcuts = () => {
+  const handleKeyDown = (event: KeyboardEvent) => {
+    // Only handle shortcuts when on the Results tab
+    if (activeTab.value !== 3) return; // Results tab is index 3
+    
+    // Check if the event target is within a request or response editor
+    const target = event.target as HTMLElement;
+    const isInEditor = target.closest('.request-editor-container') || target.closest('.response-editor-container');
+    
+    if (!isInEditor) return; // Only work when clicking on editors
+    
+    // Ctrl+R or Cmd+R to send to Repeater
+    if ((event.ctrlKey || event.metaKey) && event.key === 'r' && !event.shiftKey) {
+      event.preventDefault();
+      sendToRepeater();
+    }
+    
+    // Ctrl+Shift+R or Cmd+Shift+R to send to Replay
+    if ((event.ctrlKey || event.metaKey) && event.key === 'R' && event.shiftKey) {
+      event.preventDefault();
+      sendToReplay();
+    }
+  };
+  
+  document.addEventListener('keydown', handleKeyDown);
+  
+  // Cleanup function
+  return () => {
+    document.removeEventListener('keydown', handleKeyDown);
+  };
+};
+
+// Send current expanded result to Repeater
+const sendToRepeater = () => {
+  const expandedId = Array.from(expandedResults.value)[0];
+  if (!expandedId) {
+    return;
+  }
+  
+  let testResult = allTestResults.value.find(result => getResultId(result) === expandedId);
+  if (!testResult) {
+    testResult = testResults.value.find(result => getResultId(result) === expandedId);
+  }
+  if (!testResult) {
+    testResult = filteredTestResults.value.find(result => getResultId(result) === expandedId);
+  }
+  
+  if (testResult) {
+    try {
+      sdk.shortcuts.sendToRepeater();
+    } catch (error) {
+      // Silent fail
+    }
+  }
+};
+
+// Send current expanded result to Replay
+const sendToReplay = () => {
+  const expandedId = Array.from(expandedResults.value)[0];
+  if (!expandedId) {
+    return;
+  }
+  
+  let testResult = allTestResults.value.find(result => getResultId(result) === expandedId);
+  if (!testResult) {
+    testResult = testResults.value.find(result => getResultId(result) === expandedId);
+  }
+  if (!testResult) {
+    testResult = filteredTestResults.value.find(result => getResultId(result) === expandedId);
+  }
+  
+  if (testResult) {
+    try {
+      sdk.shortcuts.sendToReplay();
+    } catch (error) {
+      // Silent fail
+    }
+  }
+};
+
+// Setup keyboard shortcuts when component mounts
+onMounted(() => {
+  const cleanup = setupKeyboardShortcuts();
+  
+  // Cleanup on unmount
+  onUnmounted(() => {
+    cleanup();
+  });
+});
+
+// Persist results in localStorage to prevent loss when switching tabs
+const saveResultsToStorage = () => {
+  try {
+    const dataToSave = {
+      allTestResults: allTestResults.value,
+      testResults: testResults.value,
+      filteredTestResults: filteredTestResults.value,
+      timestamp: Date.now()
+    };
+    localStorage.setItem('openapi-testing-results', JSON.stringify(dataToSave));
+  } catch (error) {
+    // Silent fail if localStorage is not available
+  }
+};
+
+const loadResultsFromStorage = () => {
+  try {
+    const saved = localStorage.getItem('openapi-testing-results');
+    if (saved) {
+      const data = JSON.parse(saved);
+      // Only load if data is recent (within last hour)
+      if (data.timestamp && (Date.now() - data.timestamp) < 3600000) {
+        allTestResults.value = data.allTestResults || [];
+        testResults.value = data.testResults || [];
+        filteredTestResults.value = data.filteredTestResults || [];
+      }
+    }
+  } catch (error) {
+    // Silent fail if localStorage is not available
+  }
+};
+
+// Save results whenever they change
+watch([allTestResults, testResults, filteredTestResults], () => {
+  saveResultsToStorage();
+}, { deep: true });
+
+// Load results on mount
+onMounted(() => {
+  loadResultsFromStorage();
+});
 </script>
 
 <template>
@@ -1289,7 +1442,7 @@ watch(expandedResults, (newExpanded) => {
     </div>
       <div class="flex items-center gap-2">
         <Button 
-          v-if="isSchemaLoaded && getUniquePathVariables().length > 0"
+          v-if="isSchemaLoaded && (getUniquePathVariables().length > 0 || Object.keys(bodyVariableValues).length > 0)"
           :label="sidebarOpen ? 'Hide Variables' : 'Variables'"
           @click="toggleSidebar"
           severity="secondary"
@@ -2119,6 +2272,8 @@ watch(expandedResults, (newExpanded) => {
                 <i class="pi pi-chart-bar text-4xl mb-4"></i>
                 <p>No test results yet. Run tests from the Endpoints tab.</p>
               </div>
+              
+
  
               <div v-else>
                 <!-- Results Table -->
@@ -2212,8 +2367,8 @@ watch(expandedResults, (newExpanded) => {
         </div>
        </div>
 
-      <!-- Path Variables Sidebar -->
-      <div v-if="isSchemaLoaded && getUniquePathVariables().length > 0" 
+      <!-- Variables Sidebar -->
+      <div v-if="isSchemaLoaded && (getUniquePathVariables().length > 0 || Object.keys(bodyVariableValues).length > 0)" 
            :class="[
              'w-80 bg-white dark:bg-gray-800 border-l border-gray-200 dark:border-gray-700 shadow-lg transition-all duration-300 ease-in-out overflow-y-auto',
              sidebarOpen ? 'translate-x-0' : 'translate-x-full'
@@ -2275,6 +2430,47 @@ watch(expandedResults, (newExpanded) => {
                   </div>
                 </div>
               </div>
+            </div>
+          </div>
+          
+
+          
+          <!-- Body Variables Section -->
+          <div v-if="Object.keys(bodyVariableValues).length > 0" class="border-t border-gray-200 dark:border-gray-700 pt-4 mt-4">
+            <div class="mb-3">
+              <h4 class="text-md font-medium text-gray-700 dark:text-gray-300">Body Variables</h4>
+              <p class="text-xs text-gray-500 mt-1">
+                Customize request body parameters for POST/PUT/PATCH requests.
+              </p>
+            </div>
+            
+            <div class="space-y-3">
+              <div v-for="(value, key) in bodyVariableValues" :key="key" class="space-y-2">
+                <div class="flex items-center justify-between">
+                  <label class="block text-sm font-medium text-gray-700 dark:text-gray-300">
+                    {{ key }}
+                  </label>
+                </div>
+                
+                <div class="space-y-2">
+                  <InputText 
+                    v-model="bodyVariableValues[key]"
+                    :placeholder="`Value for ${key}`"
+                    class="w-full"
+                  />
+                </div>
+              </div>
+            </div>
+          </div>
+          
+          <!-- Debug info -->
+          <div class="border-t border-gray-200 dark:border-gray-700 pt-4 mt-4">
+            <div class="mb-3">
+              <h4 class="text-md font-medium text-gray-700 dark:text-gray-300">Debug Info</h4>
+            </div>
+            <div class="text-xs text-gray-500">
+              <p>Body Variables Count: {{ Object.keys(bodyVariableValues).length }}</p>
+              <p>Body Variables: {{ JSON.stringify(bodyVariableValues) }}</p>
             </div>
           </div>
         </div>

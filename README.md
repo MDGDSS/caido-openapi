@@ -2,6 +2,8 @@
 
 A powerful Caido extension that allow to easily test OpenAPI schemas by generating and executing test cases against your API endpoints.
 
+<img width="2829" height="1842" alt="default page" src="https://github.com/user-attachments/assets/4121de42-b673-4379-903c-6db744f805c1" />
+
 ## Features
 
 - **Schema Validation**: Validates OpenAPI schemas for correctness and completeness

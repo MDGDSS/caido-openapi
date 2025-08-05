@@ -30,6 +30,7 @@ interface TestCase {
   requestBody?: any;
   expectedStatus?: number;
   pathVariables?: string[];
+  bodyVariables?: Record<string, any>; // Add body variables
   originalPath?: string;
 }
 
@@ -40,6 +41,7 @@ interface TestResult {
   responseTime: number;
   error?: string;
   response?: any;
+  actualBody?: any; // Store the actual body that was sent
 }
 
 interface TestOptions {
@@ -68,10 +70,35 @@ const generateTestCases = (sdk: SDK, schema: OpenAPISchema): TestCase[] => {
   for (const [path, methods] of Object.entries(schema.paths)) {
     for (const [method, operation] of Object.entries(methods)) {
       if (method.toLowerCase() === 'get' || method.toLowerCase() === 'post' || 
-          method.toLowerCase() === 'put' || method.toLowerCase() === 'delete') {
+          method.toLowerCase() === 'put' || method.toLowerCase() === 'delete' || method.toLowerCase() === 'patch') {
         
         // Extract path variables from the path
         const pathVariables = extractPathVariables(path);
+        
+        // Extract body parameters for Swagger 2.0
+        let bodyParameter = null;
+        let bodyVariables: Record<string, any> = {};
+        
+        if (operation.parameters) {
+          for (const param of operation.parameters) {
+            if (param.in === 'body' && param.schema) {
+              bodyParameter = param.schema;
+              // Extract body variables from schema
+              bodyVariables = extractBodyVariables(param.schema, schema, sdk);
+              break;
+            }
+          }
+        }
+        
+        // For OpenAPI 3.x requestBody
+        if (operation.requestBody?.content) {
+          const content = operation.requestBody.content;
+          const mediaType = Object.keys(content)[0] || 'application/json';
+          const requestBodySchema = content[mediaType]?.schema;
+          if (requestBodySchema) {
+            bodyVariables = extractBodyVariables(requestBodySchema, schema, sdk);
+          }
+        }
         
         const testCase: TestCase = {
           path,
@@ -79,11 +106,14 @@ const generateTestCases = (sdk: SDK, schema: OpenAPISchema): TestCase[] => {
           name: `${method.toUpperCase()} ${path}`,
           description: operation.summary || operation.description || `Test ${method.toUpperCase()} ${path}`,
           parameters: operation.parameters || [],
-          requestBody: operation.requestBody,
+          requestBody: operation.requestBody || bodyParameter, // Use body parameter for Swagger 2.0
           expectedStatus: getExpectedStatus(operation),
           pathVariables,
+          bodyVariables,
           originalPath: path
         };
+        
+
         
         testCases.push(testCase);
       }
@@ -102,6 +132,32 @@ const extractPathVariables = (path: string): string[] => {
   while ((match = pathVariableRegex.exec(path)) !== null) {
     if (match[1]) {
       variables.push(match[1]);
+    }
+  }
+  
+  return variables;
+};
+
+// Extract body variables from schema
+const extractBodyVariables = (schema: any, parsedSchema: OpenAPISchema, sdk?: SDK): Record<string, any> => {
+  const variables: Record<string, any> = {};
+  
+  // Handle $ref
+  if (schema.$ref) {
+    const refName = schema.$ref.split('/').pop();
+    const refSchema = parsedSchema.definitions?.[refName] || parsedSchema.components?.schemas?.[refName];
+    if (refSchema && refSchema.properties) {
+      for (const [propName, propSchema] of Object.entries(refSchema.properties)) {
+        variables[propName] = generateExampleValue(propSchema as any, 0, parsedSchema);
+      }
+    }
+    return variables;
+  }
+  
+  // Handle direct properties
+  if (schema.properties) {
+    for (const [propName, propSchema] of Object.entries(schema.properties)) {
+      variables[propName] = generateExampleValue(propSchema as any, 0, parsedSchema);
     }
   }
   
@@ -367,8 +423,9 @@ const findPossibleObjectDefinitions = (param: any, parsedSchema: OpenAPISchema, 
   return candidates;
 };
 
-const executeTest = async (sdk: SDK, testCase: TestCase, options: TestOptions, pathVariableValues?: Record<string, string>): Promise<TestResult> => {
+const executeTest = async (sdk: SDK, testCase: TestCase, options: TestOptions, pathVariableValues?: Record<string, string>, bodyVariableValues?: Record<string, any>): Promise<TestResult> => {
   const startTime = Date.now();
+  let requestBody: any = null; // Declare requestBody at function scope
   
   try {
     // Replace path variables with actual values
@@ -408,20 +465,47 @@ const executeTest = async (sdk: SDK, testCase: TestCase, options: TestOptions, p
       spec.setHeader(key, value);
     });
 
+    // Determine request body for all methods (needed for actualBody in results)
+    let requestBody = testCase.requestBody;
+    
+    // Use provided body variables if available - but only for the current test case
+    sdk.console.log(`Checking body variables for ${testCase.method} ${testCase.path}:`);
+    sdk.console.log(`- bodyVariableValues:`, JSON.stringify(bodyVariableValues, null, 2));
+    sdk.console.log(`- testCase.bodyVariables:`, JSON.stringify(testCase.bodyVariables, null, 2));
+    
+    if (bodyVariableValues && Object.keys(bodyVariableValues).length > 0 && testCase.bodyVariables) {
+      // Only use body variables that are relevant to this test case
+      const relevantBodyVariables: Record<string, any> = {};
+      Object.keys(testCase.bodyVariables).forEach(key => {
+        if (bodyVariableValues[key] !== undefined) {
+          relevantBodyVariables[key] = bodyVariableValues[key];
+        }
+      });
+      
+      if (Object.keys(relevantBodyVariables).length > 0) {
+        requestBody = relevantBodyVariables;
+        sdk.console.log(`Using relevant body variables for ${testCase.method} ${testCase.path}:`, JSON.stringify(requestBody, null, 2));
+      } else {
+        // Fallback to test case body variables
+        requestBody = testCase.bodyVariables;
+        sdk.console.log(`Using test case body variables for ${testCase.method} ${testCase.path}:`, JSON.stringify(requestBody, null, 2));
+      }
+    } else if (testCase.bodyVariables && Object.keys(testCase.bodyVariables).length > 0) {
+      // Use extracted body variables from test case
+      requestBody = testCase.bodyVariables;
+      sdk.console.log(`Using extracted body variables for ${testCase.method} ${testCase.path}:`, JSON.stringify(requestBody, null, 2));
+    } else if (options.parsedSchema && options.useParameterFromDefinition !== false) {
+      // If we have a parsed schema and useParameterFromDefinition is enabled, try to generate example values
+      const generatedBody = generateRequestBodyFromSchema(testCase, options.parsedSchema);
+      if (generatedBody) {
+        requestBody = generatedBody;
+        sdk.console.log(`Generated request body for ${testCase.method} ${testCase.path}:`, JSON.stringify(requestBody, null, 2));
+      }
+    }
+    
     // Add request body and Content-Length for POST/PUT/PATCH requests
     let requestBodyString = '';
     if (testCase.method === 'POST' || testCase.method === 'PUT' || testCase.method === 'PATCH') {
-      let requestBody = testCase.requestBody;
-      
-      // If we have a parsed schema and useParameterFromDefinition is enabled, try to generate example values
-      if (options.parsedSchema && options.useParameterFromDefinition !== false) {
-        const generatedBody = generateRequestBodyFromSchema(testCase, options.parsedSchema);
-        if (generatedBody) {
-          requestBody = generatedBody;
-          sdk.console.log(`Generated request body for ${testCase.method} ${testCase.path}:`, JSON.stringify(requestBody, null, 2));
-        }
-      }
-      
       // Set request body if available
       if (requestBody) {
         requestBodyString = JSON.stringify(requestBody);
@@ -490,20 +574,26 @@ const executeTest = async (sdk: SDK, testCase: TestCase, options: TestOptions, p
           responseData = responseBody;
         }
         const success = statusCode >= 200 && statusCode < 300;
-        return {
+        const result = {
           testCase,
           success,
           status: statusCode,
           responseTime,
-          response: responseData
+          response: responseData,
+          actualBody: requestBody
         };
+        
+
+        
+        return result;
       } catch (responseError) {
         return {
           testCase,
           success: false,
           status: 0,
           responseTime,
-          error: `Response processing error: ${responseError}`
+          error: `Response processing error: ${responseError}`,
+          actualBody: requestBody || null
         };
       }
     } else {
@@ -518,7 +608,8 @@ const executeTest = async (sdk: SDK, testCase: TestCase, options: TestOptions, p
       success: false,
       status: 0,
       responseTime,
-      error: error instanceof Error ? error.message : 'Unknown error'
+      error: error instanceof Error ? error.message : 'Unknown error',
+      actualBody: requestBody || null
     };
   }
 };
@@ -642,10 +733,10 @@ const runSpecificTests = async (sdk: SDK, schemaText: string, baseUrl: string, t
   }
 };
 
-const runSingleTest = async (sdk: SDK, testCase: TestCase, baseUrl: string, options: Partial<TestOptions> = {}, pathVariableValues?: Record<string, string>): Promise<TestResult> => {
+const runSingleTest = async (sdk: SDK, testCase: TestCase, baseUrl: string, options: Partial<TestOptions> = {}, pathVariableValues?: Record<string, string>, bodyVariableValues?: Record<string, any>): Promise<TestResult> => {
   try {
     sdk.console.log(`Running single test: ${testCase.name} against ${baseUrl}`);
-    const result = await executeTest(sdk, testCase, { ...options, baseUrl }, pathVariableValues);
+    const result = await executeTest(sdk, testCase, { ...options, baseUrl }, pathVariableValues, bodyVariableValues);
     
     sdk.console.log(`runSingleTest returning:`, {
       testCase: result.testCase.name,

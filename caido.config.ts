@@ -10,9 +10,9 @@ import prefixwrap from "postcss-prefixwrap";
 const id = "openapi-tester";
 export default defineConfig({
   id,
-  name: "OpenAPI Tester",
+  name: "OpenAPI",
   description: "OpenAPI schema testing and validation",
-  version: "1.2.4",
+  version: "1.2.41",
   author: {
     name: "xvffdos",
     email: "dev@xvffdos.com",
