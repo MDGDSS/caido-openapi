@@ -224,6 +224,50 @@ const loadSchema = async () => {
   }
 };
 
+const attachRequestContextMenu = (container: HTMLElement, testResult: any) => {
+  const menuId = `ctx-${getResultId(testResult)}`;
+  let menu = container.querySelector(`#${menuId}`) as HTMLElement | null;
+  if (!menu) {
+    menu = document.createElement('div');
+    menu.id = menuId;
+    menu.style.position = 'fixed';
+    menu.style.zIndex = '9999';
+    menu.style.display = 'none';
+    menu.style.minWidth = '160px';
+    menu.style.background = 'var(--p-surface-0, #fff)';
+    menu.style.border = '1px solid var(--p-surface-300, #e5e7eb)';
+    menu.style.borderRadius = '6px';
+    menu.style.boxShadow = '0 10px 15px -3px rgba(0,0,0,0.1), 0 4px 6px -4px rgba(0,0,0,0.1)';
+    menu.innerHTML = `
+      <div style="padding:8px 10px; cursor:pointer; font-size: 13px;" data-action="replay">Send to Replay</div>
+      <div style="padding:8px 10px; cursor:pointer; font-size: 13px;" data-action="repeater">Send to Repeater</div>
+    `;
+    document.body.appendChild(menu);
+
+    const hideMenu = () => (menu!.style.display = 'none');
+    document.addEventListener('click', hideMenu);
+    document.addEventListener('scroll', hideMenu, true);
+
+    menu.addEventListener('click', (e) => {
+      const target = e.target as HTMLElement;
+      const action = target.getAttribute('data-action');
+      if (action === 'replay') {
+        try { sdk.shortcuts.sendToReplay(); } catch (_) {}
+      } else if (action === 'repeater') {
+        try { sdk.shortcuts.sendToRepeater(); } catch (_) {}
+      }
+      hideMenu();
+    });
+
+    container.addEventListener('contextmenu', (e) => {
+      e.preventDefault();
+      menu!.style.display = 'block';
+      menu!.style.left = `${e.clientX}px`;
+      menu!.style.top = `${e.clientY}px`;
+    });
+  }
+};
+
 const validateSchema = async () => {
   if (!schemaText.value.trim()) {
     validationResult.value = { valid: false, errors: ["Please enter an OpenAPI schema"] };
@@ -236,6 +280,18 @@ const validateSchema = async () => {
     validationResult.value = { valid: false, errors: [error instanceof Error ? error.message : "Validation failed"] };
   }
 };
+
+const toMinimalTestCase = (tc: any) => ({
+  path: tc.path,
+  method: tc.method,
+  name: tc.name,
+  description: tc.description,
+  parameters: tc.parameters || [],
+  expectedStatus: tc.expectedStatus,
+  pathVariables: tc.pathVariables || [],
+  bodyVariables: tc.bodyVariables || {},
+  originalPath: tc.originalPath || tc.path
+});
 
 const runAllTests = async () => {
   if (!schemaText.value.trim() || !baseUrl.value.trim()) {
@@ -252,8 +308,8 @@ const runAllTests = async () => {
       delayBetweenRequests: delayBetweenRequests.value,
       timeout: timeout.value,
       headers: parseCustomHeaders(),
-      parsedSchema: parsedSchema.value, // Pass the parsed schema for example value generation
-      useParameterFromDefinition: useParameterFromDefinition.value // Pass the checkbox value
+      // Do not include parsedSchema in options to avoid very large RPC payloads
+      useParameterFromDefinition: useParameterFromDefinition.value
     };
     
     // Get all test cases first
@@ -269,14 +325,14 @@ const runAllTests = async () => {
       
       if (variableCombinations.length === 0) {
         // No path variables, run single test
-        const result = await sdk.backend.runSingleTest(testCase, baseUrl.value, options, {}, bodyVariableValues.value);
+        const result = await sdk.backend.runSingleTest(toMinimalTestCase(testCase), baseUrl.value, options, {}, bodyVariableValues.value);
         updateTestCaseResult(testCase, result);
       } else {
         // Run test for each combination
         for (const combination of variableCombinations) {
           if (stopTestRequested.value) break;
           
-          const result = await sdk.backend.runSingleTest(testCase, baseUrl.value, options, combination, bodyVariableValues.value);
+          const result = await sdk.backend.runSingleTest(toMinimalTestCase(testCase), baseUrl.value, options, combination, bodyVariableValues.value);
           updateTestCaseResult(testCase, result, combination);
           
           // Add delay between requests if specified
@@ -313,8 +369,8 @@ const runSingleTest = async (testCase: any) => {
       delayBetweenRequests: 0,
       timeout: timeout.value,
       headers: parseCustomHeaders(),
-      parsedSchema: parsedSchema.value, // Pass the parsed schema for example value generation
-      useParameterFromDefinition: useParameterFromDefinition.value // Pass the checkbox value
+      // Do not include parsedSchema in options to avoid very large RPC payloads
+      useParameterFromDefinition: useParameterFromDefinition.value
     };
     
     // Get all combinations of path variable values
@@ -322,7 +378,7 @@ const runSingleTest = async (testCase: any) => {
     
     if (variableCombinations.length === 0) {
       // No path variables or no values, run single test
-      const result = await sdk.backend.runSingleTest(testCase, baseUrl.value, options, {}, bodyVariableValues.value);
+      const result = await sdk.backend.runSingleTest(toMinimalTestCase(testCase), baseUrl.value, options, {}, bodyVariableValues.value);
       updateTestCaseResult(testCase, result);
     } else {
       // Run test for each combination
@@ -330,7 +386,7 @@ const runSingleTest = async (testCase: any) => {
         const combination = variableCombinations[i];
         if (stopTestRequested.value) break;
         
-        const result = await sdk.backend.runSingleTest(testCase, baseUrl.value, options, combination, bodyVariableValues.value);
+        const result = await sdk.backend.runSingleTest(toMinimalTestCase(testCase), baseUrl.value, options, combination, bodyVariableValues.value);
         updateTestCaseResult(testCase, result, combination);
         
         // Add delay between requests if specified
@@ -424,7 +480,7 @@ const updateTestCaseResult = (testCase: any, result: any, combination?: Record<s
 };
 
 const getStatusIcon = (success: boolean) => {
-  return success ? "✅" : "❌";
+  return success ? "" : "";
 };
 
 const getStatusClass = (success: boolean) => {
@@ -515,6 +571,7 @@ const createNativeCaidoEditors = (testResult: any) => {
     // Create request editor
     if (requestContainer) {
       requestContainer.classList.add('request-editor-container');
+      try { requestContainer.setAttribute('data-result-id', resultId); } catch (_) {}
       const requestContent = formatRequestForCaido(testResult);
       
       try {
@@ -549,6 +606,10 @@ const createNativeCaidoEditors = (testResult: any) => {
           } catch (e) {
             // Silent fail
           }
+          // Attach contextual menu to request container after content is set
+          try {
+            attachRequestContextMenu(requestContainer, testResult);
+          } catch (_) {}
         }, 200);
       } catch (e) {
         // Silent fail
@@ -602,18 +663,157 @@ const createNativeCaidoEditors = (testResult: any) => {
   }
 };
 
+// Global context menu for request editor (capture phase) to avoid editors eating the event
+let requestCtxMenuEl: HTMLElement | null = null;
+const setupGlobalRequestContextMenu = () => {
+  if (requestCtxMenuEl) return;
+  const menu = document.createElement('div');
+  requestCtxMenuEl = menu;
+  menu.id = 'openapi-request-context-menu';
+  Object.assign(menu.style, {
+    position: 'fixed', zIndex: '9999', display: 'none', minWidth: '160px',
+    background: 'var(--p-surface-0, #fff)', border: '1px solid var(--p-surface-300, #e5e7eb)',
+    borderRadius: '6px', boxShadow: '0 10px 15px -3px rgba(0,0,0,0.1), 0 4px 6px -4px rgba(0,0,0,0.1)'
+  } as CSSStyleDeclaration);
+  menu.innerHTML = `
+    <div style="padding:8px 10px; cursor:pointer; font-size: 13px;" data-action="replay">Send to Replay</div>
+  `;
+  document.body.appendChild(menu);
+
+  const hideMenu = () => { if (menu) menu.style.display = 'none'; };
+  document.addEventListener('click', hideMenu, true);
+  document.addEventListener('scroll', hideMenu, true);
+
+  menu.addEventListener('click', () => {
+    hideMenu();
+  });
+
+  document.addEventListener('contextmenu', (e: MouseEvent) => {
+    const target = e.target as HTMLElement | null;
+    if (!target) return;
+    const container = target.closest('.request-editor-container') as HTMLElement | null;
+    if (!container) return;
+    e.preventDefault();
+    e.stopPropagation();
+    // Theme-aware colors to avoid white-on-white
+    try {
+      const isDark = document.documentElement.classList.contains('dark') || document.body.classList.contains('dark');
+      menu.style.background = isDark ? 'var(--p-surface-900, #111827)' : 'var(--p-surface-0, #ffffff)';
+      menu.style.borderColor = isDark ? 'var(--p-surface-700, #374151)' : 'var(--p-surface-300, #e5e7eb)';
+      menu.style.color = isDark ? 'var(--p-surface-200, #e5e7eb)' : 'var(--p-surface-900, #111827)';
+      Array.from(menu.children).forEach((child: any) => {
+        child.style.color = menu.style.color;
+      });
+    } catch (_) {}
+    menu.style.display = 'block';
+    menu.style.left = `${e.clientX}px`;
+    menu.style.top = `${e.clientY}px`;
+    // Stash the current expanded result id so actions know which to send
+    const rid = container.getAttribute('data-result-id') || '';
+    menu.setAttribute('data-result-id', rid);
+  }, true);
+
+  // Create replay helper: call backend API to ensure collection and send
+  async function sendResultToReplay(testResult: any) {
+    try {
+      if (!testResult) return;
+      const base = baseUrl.value?.trim();
+      if (!base) return;
+      await sdk.backend.sendResultToReplay(testResult, base);
+    } catch (_) {}
+  }
+
+  menu.addEventListener('click', async (e) => {
+    const target = e.target as HTMLElement;
+    const action = target.getAttribute('data-action');
+    const rid = menu.getAttribute('data-result-id') || '';
+    let testResult = allTestResults.value.find(r => getResultId(r) === rid)
+      || testResults.value.find(r => getResultId(r) === rid)
+      || filteredTestResults.value.find(r => getResultId(r) === rid);
+    // Focus the editor to make Caido shortcuts work reliably
+    try {
+      const focusable = document.querySelector(`.request-editor-container[data-result-id="${rid}"] .cm-content, .request-editor-container[data-result-id="${rid}"] textarea`) as HTMLElement | null;
+      if (focusable && typeof (focusable as any).focus === 'function') (focusable as any).focus();
+    } catch (_) {}
+    try {
+      if (action === 'replay') {
+        // Ensure a collection exists with normalized base url as name, get its id
+        const baseRaw = baseUrl.value?.trim() || '';
+        const baseTrimmed = baseRaw.replace(/\/+$/, '');
+        let collectionName = baseTrimmed;
+        try {
+          const u = new URL(baseTrimmed);
+          const path = (u.pathname || '').replace(/\/+$/, '');
+          collectionName = `${u.host}${path}` || u.host;
+        } catch (_) {}
+        let collectionId: string | undefined = undefined;
+        try {
+          const collections = await (sdk as any).replay.getCollections();
+          const existing = Array.isArray(collections)
+            ? collections.find((c: any) => ((c?.name || '').trim() === collectionName))
+            : undefined;
+          if (existing && existing.id) {
+            collectionId = String(existing.id);
+          } else {
+            const created = await (sdk as any).replay.createCollection(collectionName);
+            if (created && created.id) collectionId = String(created.id);
+          }
+        } catch (_) {}
+
+        // Build source for session: prefer saved request ID, otherwise construct a RequestSpec
+        let source: any = testResult?.requestId;
+        if (!source) {
+          try {
+            const url = testResult?.requestUrl || `${baseTrimmed}${testResult?.requestPath || testResult?.testCase?.path || ''}`;
+            const SpecCtor = (window as any).RequestSpec;
+            if (SpecCtor) {
+              const spec = new SpecCtor(url);
+              if (testResult?.testCase?.method) spec.setMethod(testResult.testCase.method);
+              if (testResult?.requestPath) spec.setPath(testResult.requestPath);
+              if (testResult?.requestQuery) spec.setQuery(testResult.requestQuery);
+              if (testResult?.actualBody) {
+                try { spec.setBody(JSON.stringify(testResult.actualBody)); } catch (_) {}
+              }
+              source = spec;
+            }
+          } catch (_) {}
+        }
+
+        // Create Replay session via backend (Workflow SDK) so it works reliably in plugins
+        try {
+          const result = await (sdk as any).backend.sendResultToReplay(
+            { ...testResult, requestId: testResult?.requestId },
+            collectionName,
+            collectionId
+          );
+          const sessionId = result?.sessionId;
+          if (result?.success && sessionId) {
+            (sdk as any).replay?.openTab?.(sessionId);
+          }
+        } catch (_) {}
+      }
+    } catch (_) {}
+  });
+};
+
 const formatRequestForCaido = (testResult: any): string => {
-  const { testCase, combination } = testResult;
+  const { testCase, combination, requestPath, requestQuery, requestRaw } = testResult;
+
+  // Prefer the exact raw request from backend if available
+  if (requestRaw && typeof requestRaw === 'string' && requestRaw.trim().length > 0) {
+    return requestRaw;
+  }
   
-  // Replace path variables in the URL
-  let finalPath = testCase.path;
-  if (combination && Object.keys(combination).length > 0) {
+  // Prefer the actual path/query used by the backend if provided
+  let finalPath = requestPath || testCase.path;
+  if (!requestPath && combination && Object.keys(combination).length > 0) {
     Object.entries(combination).forEach(([key, value]) => {
       finalPath = finalPath.replace(`{${key}}`, value);
     });
   }
+  const query = requestQuery ? `?${requestQuery}` : '';
   
-  let request = `${testCase.method} ${finalPath} HTTP/1.1\r\n`;
+  let request = `${testCase.method} ${finalPath}${query} HTTP/1.1\r\n`;
   request += `Host: ${getHostFromUrl(baseUrl.value)}\r\n`;
   request += `User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36\r\n`;
   request += `Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8\r\n`;
@@ -624,19 +824,15 @@ const formatRequestForCaido = (testResult: any): string => {
   
   request += '\r\n';
   
-  // Add request body if present
-  if (testCase.requestBody) {
-    // Use the actual body that was sent, not the schema reference
-    let bodyToShow = testCase.requestBody;
-    
-    // First, try to get the actual body from the test result
-    if (testResult && testResult.actualBody) {
-      bodyToShow = testResult.actualBody;
-    } else if (testCase.bodyVariables && Object.keys(testCase.bodyVariables).length > 0) {
-      // Fallback to body variables if actual body not available
-      bodyToShow = testCase.bodyVariables;
-    }
-    
+  // Add request body only when one was actually sent, or when method typically has a body
+  let bodyToShow: any | undefined = undefined;
+  if (testResult && testResult.actualBody) {
+    bodyToShow = testResult.actualBody;
+  } else if ((testCase.method === 'POST' || testCase.method === 'PUT' || testCase.method === 'PATCH') && testCase.bodyVariables && Object.keys(testCase.bodyVariables).length > 0) {
+    bodyToShow = testCase.bodyVariables;
+  }
+  
+  if (bodyToShow !== undefined) {
     request += JSON.stringify(bodyToShow, null, 2);
   }
   
@@ -1370,10 +1566,28 @@ const sendToReplay = () => {
 // Setup keyboard shortcuts when component mounts
 onMounted(() => {
   const cleanup = setupKeyboardShortcuts();
+  // Setup a global right-click menu on request editors
+  setupGlobalRequestContextMenu();
+  // Re-render editors for expanded results after navigation/visibility changes
+  const handleVisibility = () => {
+    if (document.visibilityState === 'visible') {
+      // Recreate editors for all expanded results
+      Array.from(expandedResults.value).forEach((id) => {
+        let testResult = allTestResults.value.find(result => getResultId(result) === id)
+          || testResults.value.find(result => getResultId(result) === id)
+          || filteredTestResults.value.find(result => getResultId(result) === id);
+        if (testResult) {
+          setTimeout(() => createNativeCaidoEditors(testResult), 50);
+        }
+      });
+    }
+  };
+  document.addEventListener('visibilitychange', handleVisibility);
   
   // Cleanup on unmount
   onUnmounted(() => {
     cleanup();
+    document.removeEventListener('visibilitychange', handleVisibility);
   });
 });
 

@@ -42,6 +42,11 @@ interface TestResult {
   error?: string;
   response?: any;
   actualBody?: any; // Store the actual body that was sent
+  requestPath?: string;
+  requestQuery?: string;
+  requestUrl?: string;
+  requestId?: string;
+  requestRaw?: string;
 }
 
 interface TestOptions {
@@ -54,10 +59,66 @@ interface TestOptions {
   useParameterFromDefinition?: boolean; // Whether to use example values from schema
 }
 
+// Build query parameters from OpenAPI parameters definition
+const buildQueryParams = (parameters?: any[]): Record<string, string> => {
+  const queryParams: Record<string, string> = {};
+  if (!parameters || parameters.length === 0) return queryParams;
+
+  for (const param of parameters) {
+    if (!param || (param.in !== 'query' && param.in !== 'Query')) continue;
+    const name = param.name || '';
+    if (!name) continue;
+
+    // Prefer explicit example/defaults
+    let value: any = undefined;
+    if (param.example !== undefined) value = param.example;
+    else if (param.examples) {
+      const firstKey = Object.keys(param.examples)[0];
+      if (firstKey && param.examples[firstKey]?.value !== undefined) {
+        value = param.examples[firstKey].value;
+      }
+    }
+
+    const schema = param.schema || {};
+    if (value === undefined) {
+      if (schema.example !== undefined) value = schema.example;
+      else if (schema.default !== undefined) value = schema.default;
+    }
+
+    // Fallback: generate a basic example from schema/type
+    if (value === undefined) {
+      const basicSchema = schema.type ? schema : param; // Swagger 2 may use param.type
+      try {
+        value = generateExampleValue(basicSchema, 0);
+      } catch (_) {
+        // Final fallback by type heuristics
+        const type = basicSchema.type || 'string';
+        if (type === 'integer' || type === 'number') value = 0;
+        else if (type === 'boolean') value = true;
+        else if (type === 'array') value = ['value'];
+        else value = 'value';
+      }
+    }
+
+    // Only include required params, or those with computed values
+    if (param.required || value !== undefined) {
+      if (Array.isArray(value)) {
+        queryParams[name] = value.map(v => String(v)).join(',');
+      } else if (typeof value === 'object' && value !== null) {
+        queryParams[name] = JSON.stringify(value);
+      } else {
+        queryParams[name] = String(value);
+      }
+    }
+  }
+
+  return queryParams;
+};
+
 const parseOpenAPISchema = (sdk: SDK, schemaText: string): OpenAPISchema => {
   try {
     const schema = JSON.parse(schemaText);
-    sdk.console.log("OpenAPI schema parsed successfully");
+    // sdk.console.log("OpenAPI schema parsed successfully");
     return schema;
   } catch (error) {
     throw new Error(`Failed to parse OpenAPI schema: ${error}`);
@@ -120,7 +181,7 @@ const generateTestCases = (sdk: SDK, schema: OpenAPISchema): TestCase[] => {
     }
   }
   
-  sdk.console.log(`Generated ${testCases.length} test cases`);
+  // sdk.console.log(`Generated ${testCases.length} test cases`);
   return testCases;
 };
 
@@ -437,17 +498,53 @@ const executeTest = async (sdk: SDK, testCase: TestCase, options: TestOptions, p
       }
     }
     
-    const url = `${options.baseUrl}${finalPath}`;
-    
-    // Create RequestSpec for Caido HTTP request
-    const spec = new RequestSpec(url);
+    // Build query string from operation parameters (query params)
+    const queryParams = buildQueryParams(testCase.parameters);
+    const queryStringRaw = Object.keys(queryParams).length > 0
+      ? Object.entries(queryParams)
+          .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`)
+          .join('&')
+      : '';
+
+    // Parse base URL to extract scheme/host and base path (Caido RequestSpec constructor only uses scheme/host/port)
+    let specBase = options.baseUrl;
+    let basePathPrefix = '';
+    try {
+      const parsed = new URL(options.baseUrl);
+      specBase = `${parsed.protocol}//${parsed.host}`; // host includes hostname:port when present
+      basePathPrefix = parsed.pathname || '';
+      if (basePathPrefix.endsWith('/')) {
+        basePathPrefix = basePathPrefix.slice(0, -1);
+      }
+    } catch (_) {
+      // If parsing fails, fall back to using the provided base URL and no base path prefix
+      specBase = options.baseUrl;
+      basePathPrefix = '';
+    }
+
+    // Compose full path (base path prefix + API path)
+    const safeFinalPath = finalPath.startsWith('/') ? finalPath : `/${finalPath}`;
+    const fullPath = `${basePathPrefix}${safeFinalPath}` || '/';
+
+    // Create RequestSpec for Caido HTTP request using only scheme/host, then set path and query explicitly
+    const spec = new RequestSpec(specBase);
     spec.setMethod(testCase.method);
+    spec.setPath(fullPath);
+    if (queryStringRaw) {
+      spec.setQuery(queryStringRaw);
+    }
     
     // Set headers - custom headers from UI replace defaults
     const defaultHeaders = {
       'Content-Type': 'application/json',
       'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
+      'Accept-Language': 'fr-FR,fr;q=0.9,en-US;q=0.8,en;q=0.7',
       'Accept-Encoding': 'gzip, deflate, br, zstd',
+      'Upgrade-Insecure-Requests': '1',
+      'Sec-Fetch-Site': 'none',
+      'Sec-Fetch-Mode': 'navigate',
+      'Sec-Fetch-User': '?1',
+      'Sec-Fetch-Dest': 'document',
       'Connection': 'keep-alive',
       'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36',
       'sec-ch-ua': '"Not)A;Brand";v="8", "Chromium";v="138", "Google Chrome";v="138"',
@@ -456,9 +553,10 @@ const executeTest = async (sdk: SDK, testCase: TestCase, options: TestOptions, p
     };
     
     // Use custom headers if provided, otherwise use defaults
-    const headersToUse = options.headers && Object.keys(options.headers).length > 0 
-      ? options.headers 
-      : defaultHeaders;
+    const headersToUse = {
+      ...defaultHeaders,
+      ...(options.headers && Object.keys(options.headers).length > 0 ? options.headers : {})
+    };
     
     // Set all headers
     Object.entries(headersToUse).forEach(([key, value]) => {
@@ -466,13 +564,12 @@ const executeTest = async (sdk: SDK, testCase: TestCase, options: TestOptions, p
     });
 
     // Determine request body for all methods (needed for actualBody in results)
-    let requestBody = testCase.requestBody;
-    
+    // Important: never send the raw OpenAPI requestBody object. Only send concrete data values.
+    requestBody = null;
+
     // Use provided body variables if available - but only for the current test case
-    sdk.console.log(`Checking body variables for ${testCase.method} ${testCase.path}:`);
-    sdk.console.log(`- bodyVariableValues:`, JSON.stringify(bodyVariableValues, null, 2));
-    sdk.console.log(`- testCase.bodyVariables:`, JSON.stringify(testCase.bodyVariables, null, 2));
-    
+    // Debug logs removed
+
     if (bodyVariableValues && Object.keys(bodyVariableValues).length > 0 && testCase.bodyVariables) {
       // Only use body variables that are relevant to this test case
       const relevantBodyVariables: Record<string, any> = {};
@@ -481,25 +578,25 @@ const executeTest = async (sdk: SDK, testCase: TestCase, options: TestOptions, p
           relevantBodyVariables[key] = bodyVariableValues[key];
         }
       });
-      
+
       if (Object.keys(relevantBodyVariables).length > 0) {
         requestBody = relevantBodyVariables;
-        sdk.console.log(`Using relevant body variables for ${testCase.method} ${testCase.path}:`, JSON.stringify(requestBody, null, 2));
-      } else {
-        // Fallback to test case body variables
+        // Debug logs removed
+      } else if (testCase.bodyVariables && Object.keys(testCase.bodyVariables).length > 0) {
+        // Fallback to test case body variables if any are defined for this endpoint
         requestBody = testCase.bodyVariables;
-        sdk.console.log(`Using test case body variables for ${testCase.method} ${testCase.path}:`, JSON.stringify(requestBody, null, 2));
+        // Debug logs removed
       }
     } else if (testCase.bodyVariables && Object.keys(testCase.bodyVariables).length > 0) {
       // Use extracted body variables from test case
       requestBody = testCase.bodyVariables;
-      sdk.console.log(`Using extracted body variables for ${testCase.method} ${testCase.path}:`, JSON.stringify(requestBody, null, 2));
-    } else if (options.parsedSchema && options.useParameterFromDefinition !== false) {
-      // If we have a parsed schema and useParameterFromDefinition is enabled, try to generate example values
+      // Debug logs removed
+    } else if (testCase.requestBody && options.parsedSchema && options.useParameterFromDefinition !== false) {
+      // If this operation defines a requestBody, generate concrete example values from the schema
       const generatedBody = generateRequestBodyFromSchema(testCase, options.parsedSchema);
       if (generatedBody) {
         requestBody = generatedBody;
-        sdk.console.log(`Generated request body for ${testCase.method} ${testCase.path}:`, JSON.stringify(requestBody, null, 2));
+        // Debug logs removed
       }
     }
     
@@ -521,8 +618,7 @@ const executeTest = async (sdk: SDK, testCase: TestCase, options: TestOptions, p
     if (testCase.method === 'POST' || testCase.method === 'PUT' || testCase.method === 'PATCH') {
       const contentLength = requestBodyString.length;
       spec.setHeader('Content-Length', contentLength.toString());
-      
-      sdk.console.log(`Added Content-Length header: ${contentLength} for ${testCase.method} ${testCase.path}`);
+      // Debug logs removed
     }
 
     // Send the request using Caido SDK
@@ -535,6 +631,8 @@ const executeTest = async (sdk: SDK, testCase: TestCase, options: TestOptions, p
         let statusCode: number;
         let responseBody: string;
         let responseBodyObj: any;
+        let requestRawText: string | undefined = undefined;
+        let requestId: string | undefined = undefined;
         if (typeof sentRequest.response.getCode === 'function') {
           statusCode = sentRequest.response.getCode();
         } else if (sentRequest.response.status) {
@@ -543,6 +641,23 @@ const executeTest = async (sdk: SDK, testCase: TestCase, options: TestOptions, p
           statusCode = sentRequest.response.code;
         } else {
           statusCode = 0;
+        }
+        // Try to capture the raw request text that was actually sent
+        try {
+          if (sentRequest.request && typeof sentRequest.request.getRaw === 'function') {
+            const rawReq = sentRequest.request.getRaw();
+            if (rawReq && typeof rawReq.toText === 'function') {
+              requestRawText = rawReq.toText();
+            }
+          }
+          if (sentRequest.request && typeof sentRequest.request.getId === 'function') {
+            const idVal = sentRequest.request.getId();
+            if (idVal !== undefined && idVal !== null) {
+              requestId = String(idVal);
+            }
+          }
+        } catch (_) {
+          // ignore raw extraction errors
         }
         if (typeof sentRequest.response.getBody === 'function') {
           responseBodyObj = sentRequest.response.getBody();
@@ -580,7 +695,12 @@ const executeTest = async (sdk: SDK, testCase: TestCase, options: TestOptions, p
           status: statusCode,
           responseTime,
           response: responseData,
-          actualBody: requestBody
+          actualBody: requestBody,
+          requestPath: fullPath,
+          requestQuery: queryStringRaw,
+          requestUrl: `${specBase}${fullPath}${queryStringRaw ? `?${queryStringRaw}` : ''}`,
+          requestId,
+          requestRaw: requestRawText
         };
         
 
@@ -593,7 +713,11 @@ const executeTest = async (sdk: SDK, testCase: TestCase, options: TestOptions, p
           status: 0,
           responseTime,
           error: `Response processing error: ${responseError}`,
-          actualBody: requestBody || null
+          actualBody: requestBody || null,
+          requestPath: fullPath,
+          requestQuery: queryStringRaw,
+          requestUrl: `${specBase}${fullPath}${queryStringRaw ? `?${queryStringRaw}` : ''}`,
+          requestRaw: undefined
         };
       }
     } else {
@@ -601,7 +725,7 @@ const executeTest = async (sdk: SDK, testCase: TestCase, options: TestOptions, p
     }
   } catch (error) {
     const responseTime = Date.now() - startTime;
-    sdk.console.log(`Test ${testCase.name}: FAIL (0) - ${responseTime}ms - ${error instanceof Error ? error.message : 'Unknown error'}`);
+    // Debug logs removed
     
     return {
       testCase,
@@ -609,7 +733,10 @@ const executeTest = async (sdk: SDK, testCase: TestCase, options: TestOptions, p
       status: 0,
       responseTime,
       error: error instanceof Error ? error.message : 'Unknown error',
-      actualBody: requestBody || null
+      actualBody: requestBody || null,
+      requestPath: undefined,
+      requestQuery: undefined,
+      requestUrl: undefined
     };
   }
 };
@@ -623,7 +750,7 @@ const runAllTests = async (sdk: SDK, schemaText: string, baseUrl: string, option
     const workers = options.workers || 1;
     const delayBetweenRequests = options.delayBetweenRequests || 0;
     
-    sdk.console.log(`Running ${testCases.length} tests against ${baseUrl} with ${workers} worker(s)`);
+    // Debug logs removed
     
     if (workers === 1) {
       // Sequential execution
@@ -647,7 +774,7 @@ const runAllTests = async (sdk: SDK, schemaText: string, baseUrl: string, option
           }
         }
         
-        sdk.console.log(`Test ${testCase.name}: completed`);
+        // Debug logs removed
       }
     } else {
       // Parallel execution with workers - simplified for now
@@ -720,7 +847,7 @@ const runSpecificTests = async (sdk: SDK, schemaText: string, baseUrl: string, t
     
     const results: TestResult[] = [];
     
-    sdk.console.log(`Running ${filteredTestCases.length} filtered tests against ${baseUrl}`);
+    // Debug logs removed
     
     for (const testCase of filteredTestCases) {
       const result = await executeTest(sdk, testCase, { baseUrl });
@@ -735,17 +862,10 @@ const runSpecificTests = async (sdk: SDK, schemaText: string, baseUrl: string, t
 
 const runSingleTest = async (sdk: SDK, testCase: TestCase, baseUrl: string, options: Partial<TestOptions> = {}, pathVariableValues?: Record<string, string>, bodyVariableValues?: Record<string, any>): Promise<TestResult> => {
   try {
-    sdk.console.log(`Running single test: ${testCase.name} against ${baseUrl}`);
+    // Debug logs removed
     const result = await executeTest(sdk, testCase, { ...options, baseUrl }, pathVariableValues, bodyVariableValues);
     
-    sdk.console.log(`runSingleTest returning:`, {
-      testCase: result.testCase.name,
-      success: result.success,
-      status: result.status,
-      responseTime: result.responseTime,
-      hasResponse: result.response !== undefined,
-      responseType: typeof result.response
-    });
+    // Debug logs removed
     
     return result;
   } catch (error) {
@@ -840,8 +960,7 @@ const testHttpRequest = async (sdk: SDK, url: string): Promise<{ success: boolea
     if (sentRequest.response) {
       const statusCode = sentRequest.response.getCode();
       const responseBody = sentRequest.response.getBody();
-      
-      sdk.console.log(`HTTP Test: ${url} - Status: ${statusCode}`);
+      // Debug logs removed
       
       return {
         success: statusCode >= 200 && statusCode < 300,
@@ -852,7 +971,7 @@ const testHttpRequest = async (sdk: SDK, url: string): Promise<{ success: boolea
       throw new Error('No response received');
     }
   } catch (error) {
-    sdk.console.log(`HTTP Test Failed: ${url} - ${error instanceof Error ? error.message : 'Unknown error'}`);
+    // Debug logs removed
     return {
       success: false,
       status: 0,
@@ -880,14 +999,111 @@ const openTestResultInCaido = async (sdk: SDK, testResult: TestResult, baseUrl: 
       // Open the request in Caido's native request/response viewer
       await sdk.navigation.navigateToRequest(request.id);
       
-      sdk.console.log(`Opened test result in Caido UI: ${method} ${url}`);
+      // Debug logs removed
     } else {
-      sdk.console.log(`No matching request found in Caido history: ${method} ${url}`);
+      // Debug logs removed
     }
   } catch (error) {
-    sdk.console.log(`Failed to open test result in Caido UI: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    // Debug logs removed
   }
 };
+
+// Send a test result's request to Replay, ensuring a collection exists for the given base URL
+// Note: collectionId is optional; when provided we will attach the new session to that collection
+async function sendResultToReplay(
+  sdk: SDK,
+  testResultParam: any,
+  collectionNameParam: any,
+  collectionIdParam?: any
+): Promise<{ success: boolean; sessionId?: string; error?: string }> {
+  try {
+    // Coerce/parse inputs coming from RPC which may be JSON-stringified
+    let testResult: TestResult;
+    try {
+      testResult = typeof testResultParam === 'string' ? JSON.parse(testResultParam) : testResultParam;
+    } catch (e) {
+      return { success: false, error: 'Invalid testResult payload' };
+    }
+
+    let collectionName: string = String(collectionNameParam ?? '').trim();
+    if (collectionName.startsWith('"') && collectionName.endsWith('"')) {
+      collectionName = collectionName.slice(1, -1);
+    }
+    if (!collectionName) return { success: false, error: 'Missing collection name' };
+
+    let collectionId: string | undefined = undefined;
+    if (collectionIdParam !== undefined && collectionIdParam !== null && String(collectionIdParam).trim() !== '') {
+      collectionId = String(collectionIdParam);
+    }
+
+    // Determine request source: prefer saved Request ID (most reliable), fallback to RequestSpec
+    let source: any = undefined;
+    if (testResult.requestId) {
+      source = String(testResult.requestId);
+    } else {
+      // Build RequestSpec from raw HTTP to ensure headers and formatting are preserved
+      try {
+        if (testResult.requestRaw && (sdk as any).requests?.send) {
+          // Convert raw into a RequestSpec via RequestsSDK (parse raw)
+          const tempSpec = new RequestSpec('http://localhost/');
+          try {
+            const raw = (testResult.requestRaw as string);
+            // Basic parse: split first line and headers; set method/path/query/headers
+            const [requestLine, ...rest] = raw.split('\r\n');
+            const [method, path] = requestLine.split(' ');
+            if (method) tempSpec.setMethod(method);
+            if (path) {
+              const urlObj = new URL(path, testResult.requestUrl || 'http://placeholder');
+              tempSpec.setPath(urlObj.pathname);
+              const qs = urlObj.search.replace(/^\?/, '');
+              if (qs) tempSpec.setQuery(qs);
+            }
+            for (const line of rest) {
+              if (!line) continue;
+              const idx = line.indexOf(':');
+              if (idx > 0) {
+                const h = line.slice(0, idx).trim();
+                const v = line.slice(idx + 1).trim();
+                if (h && v) tempSpec.setHeader(h, v);
+              }
+            }
+          } catch (_) {}
+          source = tempSpec;
+        } else {
+          const fullUrl = typeof testResult.requestUrl === 'string' && testResult.requestUrl.trim() !== ''
+            ? testResult.requestUrl
+            : `${testResult.requestPath || testResult.testCase?.path || '/'}`;
+          const spec = new RequestSpec(fullUrl);
+          if (testResult.testCase?.method) spec.setMethod(testResult.testCase.method);
+          if (testResult.requestPath) spec.setPath(testResult.requestPath);
+          if (testResult.requestQuery) spec.setQuery(testResult.requestQuery);
+          if (testResult.actualBody) {
+            try { spec.setBody(JSON.stringify(testResult.actualBody)); } catch (_) {}
+          }
+          source = spec;
+        }
+      } catch (e) {
+        // Debug logs removed
+      }
+    }
+
+    // Create Replay session
+    if ((sdk as any).replay?.createSession) {
+      // Workflow SDK expects positional params: createSession(source?, collection?)
+      const session = await (sdk as any).replay.createSession(
+        source,
+        (collectionId && String(collectionId).trim() !== '') ? String(collectionId) : undefined
+      );
+      const id = typeof session?.getId === 'function' ? session.getId() : (session?.id || undefined);
+      return { success: true, sessionId: id };
+    }
+    return { success: false, error: 'Replay SDK not available' };
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : 'Unknown error';
+    try { (sdk as any).console?.error?.('sendResultToReplay failed:', msg); } catch (_) {}
+    return { success: false, error: msg };
+  }
+}
 
 export type API = DefineAPI<{
   parseOpenAPISchema: typeof parseOpenAPISchema;
@@ -900,6 +1116,7 @@ export type API = DefineAPI<{
   getSchemaInfo: typeof getSchemaInfo;
   testHttpRequest: typeof testHttpRequest;
   openTestResultInCaido: typeof openTestResultInCaido;
+  sendResultToReplay: typeof sendResultToReplay;
 }>;
 
 export function init(sdk: SDK<API>) {
@@ -913,4 +1130,5 @@ export function init(sdk: SDK<API>) {
   sdk.api.register("getSchemaInfo", getSchemaInfo);
   sdk.api.register("testHttpRequest", testHttpRequest);
   sdk.api.register("openTestResultInCaido", openTestResultInCaido);
+  sdk.api.register("sendResultToReplay", sendResultToReplay);
 }
