@@ -52,6 +52,10 @@ const isHttpqlRunning = ref(false);
 const filteredTestResults = ref<any[]>([]);
 const isQueryActive = ref(false);
 
+// Endpoint search functionality
+const endpointSearchQuery = ref("");
+const filteredTestCases = ref<any[]>([]);
+
 // Schema definition viewer state
 const parsedSchema = ref<any>(null);
 const selectedPath = ref("");
@@ -141,6 +145,20 @@ const totalTests = computed(() => {
   const batchResults = testResults.value.length;
   const individualResults = testCases.value.filter(tc => tc.result).length;
   return batchResults + individualResults;
+});
+
+// Filtered test cases based on search query
+const displayTestCases = computed(() => {
+  if (!endpointSearchQuery.value.trim()) {
+    return testCases.value;
+  }
+  const query = endpointSearchQuery.value.toLowerCase();
+  return testCases.value.filter(tc => 
+    tc.path.toLowerCase().includes(query) ||
+    tc.method.toLowerCase().includes(query) ||
+    (tc.name && tc.name.toLowerCase().includes(query)) ||
+    (tc.description && tc.description.toLowerCase().includes(query))
+  );
 });
 
 const allTestResults = computed(() => {
@@ -316,8 +334,11 @@ const runAllTests = async () => {
     const schema = await sdk.backend.parseOpenAPISchema(schemaText.value);
     const testCases = await sdk.backend.generateTestCases(schema);
     
+    // Use filtered test cases if search is active
+    const testCasesToRun = endpointSearchQuery.value.trim() ? displayTestCases.value : testCases;
+    
     // Process each test case individually to show incremental results
-    for (const testCase of testCases) {
+    for (const testCase of testCasesToRun) {
       if (stopTestRequested.value) break;
       
       // Generate combinations for this test case
@@ -1186,6 +1207,19 @@ const clearQuery = () => {
   isQueryActive.value = false;
 };
 
+const clearAllResults = () => {
+  testResults.value = [];
+  testCases.value.forEach(tc => {
+    tc.result = null;
+    tc.results = [];
+  });
+  expandedResults.value.clear();
+};
+
+const clearEndpointSearch = () => {
+  endpointSearchQuery.value = "";
+};
+
 
 
 // Schema definition viewer helper functions
@@ -1836,9 +1870,29 @@ onMounted(() => {
 
                 <!-- Test Cases Table -->
                 <Card>
-                  <template #title>Endpoints ({{ testCases.length }})</template>
+                  <template #title>
+                    <div class="flex items-center justify-between">
+                      <span>Endpoints ({{ displayTestCases.length }})</span>
+                      <div class="flex items-center gap-2">
+                        <InputText
+                          v-model="endpointSearchQuery"
+                          placeholder="Search endpoints..."
+                          class="w-64"
+                          size="small"
+                        />
+                        <Button 
+                          v-if="endpointSearchQuery.trim()"
+                          label="Clear" 
+                          icon="pi pi-times"
+                          @click="clearEndpointSearch"
+                          severity="secondary"
+                          size="small"
+                        />
+                      </div>
+                    </div>
+                  </template>
                   <template #content>
-                                         <DataTable :value="testCases" stripedRows class="w-full" resizableColumns columnResizeMode="expand">
+                                         <DataTable :value="displayTestCases" stripedRows class="w-full" resizableColumns columnResizeMode="expand">
                        <Column field="method" header="Method" sortable resizable>
                          <template #body="{ data }">
                            <span class="px-2 py-1 rounded text-xs font-medium" 
@@ -2412,7 +2466,8 @@ onMounted(() => {
           <!-- Test Results Tab -->
           <TabPanel header="Results">
             <div class="space-y-4">
-              <!-- Query Bar -->
+              <!-- Query Bar (Commented out) -->
+              <!--
               <Card>
                 <template #title>Query Test Results</template>
                 <template #content>
@@ -2449,7 +2504,6 @@ onMounted(() => {
                       </div>
                     </div>
                     
-                    <!-- Query Results -->
                     <div v-if="httpqlResults" class="mt-4">
                       <h4 class="font-medium text-gray-800 dark:text-gray-200 mb-2">Query Results</h4>
                       <div class="bg-gray-50 dark:bg-gray-800 p-4 rounded-lg">
@@ -2459,6 +2513,7 @@ onMounted(() => {
                   </div>
                 </template>
               </Card>
+              -->
 
               <!-- Test Results Section -->
               <div v-if="!hasResults" class="text-center py-8 text-gray-500">
@@ -2472,10 +2527,21 @@ onMounted(() => {
                 <!-- Results Table -->
                 <Card>
                   <template #title>
-                    {{ isQueryActive ? 'Filtered Test Results' : 'Test Results' }}
-                    <span v-if="isQueryActive" class="text-sm text-gray-500 ml-2">
-                      ({{ filteredTestResults.length }} of {{ allTestResults.length }})
-                    </span>
+                    <div class="flex items-center justify-between">
+                      <span>
+                        {{ isQueryActive ? 'Filtered Test Results' : 'Test Results' }}
+                        <span v-if="isQueryActive" class="text-sm text-gray-500 ml-2">
+                          ({{ filteredTestResults.length }} of {{ allTestResults.length }})
+                        </span>
+                      </span>
+                      <Button 
+                        label="Clear All Results" 
+                        icon="pi pi-trash"
+                        @click="clearAllResults"
+                        severity="danger"
+                        size="small"
+                      />
+                    </div>
                   </template>
                   <template #content>
                     <div class="space-y-2">
