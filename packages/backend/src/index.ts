@@ -484,7 +484,7 @@ const findPossibleObjectDefinitions = (param: any, parsedSchema: OpenAPISchema, 
   return candidates;
 };
 
-const executeTest = async (sdk: SDK, testCase: TestCase, options: TestOptions, pathVariableValues?: Record<string, string>, bodyVariableValues?: Record<string, any>): Promise<TestResult> => {
+const executeTest = async (sdk: SDK, testCase: TestCase, options: TestOptions, pathVariableValues?: Record<string, string>, bodyVariableValues?: Record<string, any>, queryParameterValues?: Record<string, string>): Promise<TestResult> => {
   const startTime = Date.now();
   let requestBody: any = null; // Declare requestBody at function scope
   
@@ -500,6 +500,16 @@ const executeTest = async (sdk: SDK, testCase: TestCase, options: TestOptions, p
     
     // Build query string from operation parameters (query params)
     const queryParams = buildQueryParams(testCase.parameters);
+    
+    // Override with custom query parameter values if provided
+    if (queryParameterValues && Object.keys(queryParameterValues).length > 0) {
+      Object.entries(queryParameterValues).forEach(([key, value]) => {
+        if (value !== undefined && value !== '') {
+          queryParams[key] = value;
+        }
+      });
+    }
+    
     const queryStringRaw = Object.keys(queryParams).length > 0
       ? Object.entries(queryParams)
           .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`)
@@ -858,10 +868,10 @@ const runSpecificTests = async (sdk: SDK, schema: OpenAPISchema, baseUrl: string
   }
 };
 
-const runSingleTest = async (sdk: SDK, testCase: TestCase, baseUrl: string, options: Partial<TestOptions> = {}, pathVariableValues?: Record<string, string>, bodyVariableValues?: Record<string, any>): Promise<TestResult> => {
+const runSingleTest = async (sdk: SDK, testCase: TestCase, baseUrl: string, options: Partial<TestOptions> = {}, pathVariableValues?: Record<string, string>, bodyVariableValues?: Record<string, any>, queryParameterValues?: Record<string, string>): Promise<TestResult> => {
   try {
     // Debug logs removed
-    const result = await executeTest(sdk, testCase, { ...options, baseUrl }, pathVariableValues, bodyVariableValues);
+    const result = await executeTest(sdk, testCase, { ...options, baseUrl }, pathVariableValues, bodyVariableValues, queryParameterValues);
     
     // Debug logs removed
     

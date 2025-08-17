@@ -38,7 +38,12 @@ const customHeaders = ref("");
 const variablesExpanded = ref(true);
 const stopTestRequested = ref(false);
 const expandedResults = ref<Set<string>>(new Set());
+const expandedTestCases = ref<Set<string>>(new Set());
 const requestResponseTab = ref('request');
+// Test case specific variable values (these are overridden by sidebar values)
+const testCasePathVariableValues = ref<Record<string, Record<string, string>>>({});
+const testCaseQueryParameterValues = ref<Record<string, Record<string, string>>>({});
+const testCaseBodyVariableValues = ref<Record<string, Record<string, any>>>({});
 const requestEditor = ref<any>(null);
 const responseEditor = ref<any>(null);
 const currentExpandedId = ref<string | null>(null);
@@ -178,6 +183,12 @@ const allTestResults = computed(() => {
     const timestampB = b.timestamp || 0;
     return timestampB - timestampA; // Newest first
   });
+});
+
+// Sorted body variables for alphabetical display
+const sortedBodyVariables = computed(() => {
+  const entries = Object.entries(bodyVariableValues.value);
+  return entries.sort(([keyA], [keyB]) => keyA.localeCompare(keyB));
 });
 
 // Frontend schema parsing and test case generation functions to avoid RPC payload size issues
@@ -444,6 +455,41 @@ const loadSchema = async () => {
         }
       });
       
+      // Initialize test case specific variable values
+      testCasePathVariableValues.value = {};
+      testCaseQueryParameterValues.value = {};
+      testCaseBodyVariableValues.value = {};
+      
+      cases.forEach(testCase => {
+        const testCaseId = getTestCaseId(testCase);
+        
+        // Initialize path variables
+        if (testCase.pathVariables) {
+          testCasePathVariableValues.value[testCaseId] = {};
+          testCase.pathVariables.forEach((variable: string) => {
+            testCasePathVariableValues.value[testCaseId][variable] = '';
+          });
+        }
+        
+        // Initialize query parameters
+        if (testCase.parameters) {
+          testCaseQueryParameterValues.value[testCaseId] = {};
+          testCase.parameters.forEach((param: any) => {
+            if (param.in === 'query' && param.name) {
+              testCaseQueryParameterValues.value[testCaseId][param.name] = '';
+            }
+          });
+        }
+        
+        // Initialize body variables
+        if (testCase.bodyVariables) {
+          testCaseBodyVariableValues.value[testCaseId] = {};
+          Object.entries(testCase.bodyVariables).forEach(([key, value]) => {
+            testCaseBodyVariableValues.value[testCaseId][key] = '';
+          });
+        }
+      });
+      
 
     }
   } catch (error) {
@@ -557,14 +603,18 @@ const runAllTests = async () => {
       
       if (variableCombinations.length === 0) {
         // No path variables, run single test
-        const result = await sdk.backend.runSingleTest(toMinimalTestCase(testCase), baseUrl.value, options, {}, bodyVariableValues.value);
+        const bodyVars = getTestCaseBodyVariables(testCase);
+        const queryVars = getTestCaseQueryParameters(testCase);
+        const result = await sdk.backend.runSingleTest(toMinimalTestCase(testCase), baseUrl.value, options, {}, bodyVars, queryVars);
         updateTestCaseResult(testCase, result);
       } else {
         // Run test for each combination
         for (const combination of variableCombinations) {
           if (stopTestRequested.value) break;
           
-          const result = await sdk.backend.runSingleTest(toMinimalTestCase(testCase), baseUrl.value, options, combination, bodyVariableValues.value);
+          const bodyVars = getTestCaseBodyVariables(testCase);
+          const queryVars = getTestCaseQueryParameters(testCase);
+          const result = await sdk.backend.runSingleTest(toMinimalTestCase(testCase), baseUrl.value, options, combination, bodyVars, queryVars);
           updateTestCaseResult(testCase, result, combination);
           
           // Add delay between requests if specified
@@ -610,7 +660,9 @@ const runSingleTest = async (testCase: any) => {
     
     if (variableCombinations.length === 0) {
       // No path variables or no values, run single test
-      const result = await sdk.backend.runSingleTest(toMinimalTestCase(testCase), baseUrl.value, options, {}, bodyVariableValues.value);
+      const bodyVars = getTestCaseBodyVariables(testCase);
+      const queryVars = getTestCaseQueryParameters(testCase);
+      const result = await sdk.backend.runSingleTest(toMinimalTestCase(testCase), baseUrl.value, options, {}, bodyVars, queryVars);
       updateTestCaseResult(testCase, result);
     } else {
       // Run test for each combination
@@ -618,7 +670,9 @@ const runSingleTest = async (testCase: any) => {
         const combination = variableCombinations[i];
         if (stopTestRequested.value) break;
         
-        const result = await sdk.backend.runSingleTest(toMinimalTestCase(testCase), baseUrl.value, options, combination, bodyVariableValues.value);
+        const bodyVars = getTestCaseBodyVariables(testCase);
+        const queryVars = getTestCaseQueryParameters(testCase);
+        const result = await sdk.backend.runSingleTest(toMinimalTestCase(testCase), baseUrl.value, options, combination, bodyVars, queryVars);
         updateTestCaseResult(testCase, result, combination);
         
         // Add delay between requests if specified
@@ -648,13 +702,26 @@ const generatePathVariableCombinations = (testCase: any): Record<string, string>
   const combinations: Record<string, string>[] = [];
   const variables = testCase.pathVariables;
   const valuesPerVariable: string[][] = [];
+  const testCaseId = getTestCaseId(testCase);
   
-  // Get all values for each variable
+  // Get all values for each variable - local test case values are primary, sidebar values are fallback
   for (const variable of variables) {
-    const values = pathVariableValues.value[variable] || [''];
-    const nonEmptyValues = values.filter(v => v.trim() !== '');
+    let values: string[] = [];
     
-    if (nonEmptyValues.length === 0) {
+    // First check test case specific values (primary)
+    if (testCasePathVariableValues.value[testCaseId]?.[variable]) {
+      const testCaseValue = testCasePathVariableValues.value[testCaseId][variable].trim();
+      if (testCaseValue !== '') {
+        values = [testCaseValue];
+      }
+    }
+    
+    // If no test case values, check sidebar values (fallback)
+    if (values.length === 0 && pathVariableValues.value[variable] && pathVariableValues.value[variable].length > 0) {
+      values = pathVariableValues.value[variable].filter(v => v.trim() !== '');
+    }
+    
+    if (values.length === 0) {
       if (useRandomValues.value) {
         // Use random string for empty variables when random values is enabled
         valuesPerVariable.push([generateRandomString()]);
@@ -663,7 +730,7 @@ const generatePathVariableCombinations = (testCase: any): Record<string, string>
         valuesPerVariable.push(['']);
       }
     } else {
-      valuesPerVariable.push(nonEmptyValues);
+      valuesPerVariable.push(values);
     }
   }
   
@@ -1238,7 +1305,7 @@ const getUniquePathVariables = () => {
       });
     }
   });
-  return Array.from(variables).sort();
+  return Array.from(variables).sort((a, b) => a.localeCompare(b));
 };
 
 const toggleVariables = () => {
@@ -1258,6 +1325,118 @@ const toggleResultExpansion = (resultId: string) => {
 
 const isResultExpanded = (resultId: string) => {
   return expandedResults.value.has(resultId);
+};
+
+const toggleTestCaseExpansion = (testCase: any) => {
+  const testCaseId = `${testCase.method}-${testCase.path}`;
+  if (expandedTestCases.value.has(testCaseId)) {
+    expandedTestCases.value.delete(testCaseId);
+  } else {
+    expandedTestCases.value.add(testCaseId);
+  }
+};
+
+const isTestCaseExpanded = (testCase: any) => {
+  const testCaseId = `${testCase.method}-${testCase.path}`;
+  return expandedTestCases.value.has(testCaseId);
+};
+
+// Functions to get variable values with sidebar override
+const getTestCaseId = (testCase: any) => {
+  return `${testCase.method}-${testCase.path}`;
+};
+
+const getTestCasePathVariableValue = (testCase: any, variable: string) => {
+  const testCaseId = getTestCaseId(testCase);
+  // Test case specific values are primary, sidebar values are fallback
+  const testCaseValue = testCasePathVariableValues.value[testCaseId]?.[variable] || '';
+  if (testCaseValue.trim() !== '') {
+    return testCaseValue;
+  }
+  // Return sidebar value as fallback
+  return pathVariableValues.value[variable]?.[0] || '';
+};
+
+const getTestCaseQueryParameterValue = (testCase: any, paramName: string) => {
+  const testCaseId = getTestCaseId(testCase);
+  return testCaseQueryParameterValues.value[testCaseId]?.[paramName] || '';
+};
+
+const getTestCaseBodyVariableValue = (testCase: any, key: string) => {
+  const testCaseId = getTestCaseId(testCase);
+  // Test case specific values are primary, sidebar values are fallback
+  const testCaseValue = testCaseBodyVariableValues.value[testCaseId]?.[key];
+  if (testCaseValue !== undefined && testCaseValue !== '') {
+    return testCaseValue;
+  }
+  // Return sidebar value as fallback
+  if (bodyVariableValues.value[key] !== undefined) {
+    return bodyVariableValues.value[key];
+  }
+  // Return default value from test case
+  return testCase.bodyVariables[key] || '';
+};
+
+const getTestCaseBodyVariables = (testCase: any) => {
+  const testCaseId = getTestCaseId(testCase);
+  const bodyVars: Record<string, any> = {};
+  
+  // Start with test case default body variables
+  if (testCase.bodyVariables) {
+    Object.assign(bodyVars, testCase.bodyVariables);
+  }
+  
+  // Override with sidebar values (fallback)
+  Object.entries(bodyVariableValues.value).forEach(([key, value]) => {
+    if (value !== undefined && value !== '') {
+      bodyVars[key] = value;
+    }
+  });
+  
+  // Override with test case specific values (highest priority)
+  if (testCaseBodyVariableValues.value[testCaseId]) {
+    Object.entries(testCaseBodyVariableValues.value[testCaseId]).forEach(([key, value]) => {
+      if (value !== undefined && value !== '') {
+        bodyVars[key] = value;
+      }
+    });
+  }
+  
+  return bodyVars;
+};
+
+const getTestCaseQueryParameters = (testCase: any) => {
+  const testCaseId = getTestCaseId(testCase);
+  const queryVars: Record<string, string> = {};
+  
+  // Start with default query parameters from schema
+  if (testCase.parameters) {
+    testCase.parameters.forEach((param: any) => {
+      if (param.in === 'query' && param.name) {
+        // Use example or default value from schema
+        let defaultValue = '';
+        if (param.example !== undefined) {
+          defaultValue = String(param.example);
+        } else if (param.schema?.example !== undefined) {
+          defaultValue = String(param.schema.example);
+        } else if (param.schema?.default !== undefined) {
+          defaultValue = String(param.schema.default);
+        }
+        queryVars[param.name] = defaultValue;
+      }
+    });
+  }
+  
+  // Override with test case specific values (highest priority)
+  if (testCaseQueryParameterValues.value[testCaseId]) {
+    Object.entries(testCaseQueryParameterValues.value[testCaseId]).forEach(([key, value]) => {
+      if (value !== undefined && value !== '') {
+        queryVars[key] = value;
+      }
+    });
+  }
+  
+  return queryVars;
 };
 
 const getResultId = (data: any) => {
@@ -2029,58 +2208,139 @@ onMounted(() => {
                     </div>
                   </template>
                   <template #content>
-                                         <DataTable :value="displayTestCases" stripedRows class="w-full" resizableColumns columnResizeMode="expand">
-                       <Column field="method" header="Method" sortable resizable>
-                         <template #body="{ data }">
-                           <span class="px-2 py-1 rounded text-xs font-medium" 
-                                 :class="{
-                                   'bg-blue-100 text-blue-800': data.method === 'GET',
-                                   'bg-green-100 text-green-800': data.method === 'POST',
-                                   'bg-yellow-100 text-yellow-800': data.method === 'PUT',
-                                   'bg-red-100 text-red-800': data.method === 'DELETE'
-                                 }">
-                             {{ data.method }}
-                           </span>
-                         </template>
-                       </Column>
-                       <Column field="path" header="Path" sortable resizable class="path-column" style="width: 25vw !important; max-width: 25vw !important;">
-                         <template #body="{ data }">
-                           <code class="text-sm bg-gray-100 dark:bg-gray-700 text-gray-900 dark:text-gray-100 px-2 py-1 rounded whitespace-normal break-words">{{ data.path }}</code>
-                         </template>
-                       </Column>
-                                             <Column header="Status" sortable resizable>
-                         <template #body="{ data }">
-                           <div v-if="getTestStatus(data)" class="flex items-center gap-2">
-                             <span :class="getStatusClass(getTestStatus(data)!.success)">
-                               {{ getStatusIcon(getTestStatus(data)!.success) }}
-                             </span>
-                             <span :class="getStatusClass(getTestStatus(data)!.success)">
-                               {{ getTestStatus(data)!.status }}
-                             </span>
-                           </div>
-                           <div v-else class="text-gray-400 text-sm">Not tested</div>
-                         </template>
-                       </Column>
-                       <Column header="Response Time" sortable resizable>
-                         <template #body="{ data }">
-                           <span v-if="getTestStatus(data)" class="text-sm">
-                             {{ formatResponseTime(getTestStatus(data)!.responseTime) }}
-                           </span>
-                           <span v-else class="text-gray-400 text-sm">-</span>
-                         </template>
-                       </Column>
-                       <Column header="Actions" resizable>
-                         <template #body="{ data }">
-                           <Button 
-                             label="Test" 
-                             size="small"
-                             @click="runSingleTest(data)"
-                             :loading="isTestRunning(data)"
-                             :disabled="isTestRunning(data) || isLoading"
-                           />
-                         </template>
-                       </Column>
-                    </DataTable>
+                                                                                                                             <div class="border border-gray-200 dark:border-gray-700 rounded-lg overflow-hidden">
+                                            <!-- Table Header -->
+                                            <div class="bg-gray-100 dark:bg-gray-800 px-4 py-3 border-b border-gray-200 dark:border-gray-600">
+                                              <div class="grid grid-cols-5 gap-4 items-center text-sm font-medium text-gray-900 dark:text-gray-100">
+                                                <div>Method</div>
+                                                <div class="col-span-2">Path</div>
+                                                <div>Status</div>
+                                                <div>Actions</div>
+                                              </div>
+                                            </div>
+                                            
+                                            <!-- Table Rows -->
+                                            <div class="divide-y divide-gray-200 dark:divide-gray-600">
+                                              <div v-for="(testCase, index) in displayTestCases" :key="`${testCase.method}-${testCase.path}`" 
+                                                   :class="index % 2 === 0 ? 'bg-blue-200 dark:bg-blue-900/40' : 'bg-blue-300 dark:bg-blue-900/50'"
+                                                   :style="index % 2 === 0 ? 'background-color: #2f323a' : 'background-color: #353942'">
+                                                <!-- Main row -->
+                                                <div class="px-4 py-3 cursor-pointer" @click="toggleTestCaseExpansion(testCase)">
+                                                  <div class="grid grid-cols-5 gap-4 items-center">
+                                                    <!-- Method -->
+                                                    <div>
+                                                      <span class="px-2 py-1 rounded text-xs font-medium" 
+                                                            :class="{
+                                                              'bg-blue-100 text-blue-800': testCase.method === 'GET',
+                                                              'bg-green-100 text-green-800': testCase.method === 'POST',
+                                                              'bg-yellow-100 text-yellow-800': testCase.method === 'PUT',
+                                                              'bg-red-100 text-red-800': testCase.method === 'DELETE'
+                                                            }">
+                                                        {{ testCase.method }}
+                                                      </span>
+                                                    </div>
+                                                    
+                                                    <!-- Path -->
+                                                    <div class="col-span-2">
+                                                      <code class="text-sm bg-gray-100 dark:bg-gray-700 text-gray-900 dark:text-gray-100 px-2 py-1 rounded whitespace-normal break-words">{{ testCase.path }}</code>
+                                                    </div>
+                                                    
+                                                    <!-- Status -->
+                                                    <div>
+                                                      <div v-if="getTestStatus(testCase)" class="flex items-center gap-2">
+                                                        <span :class="getStatusClass(getTestStatus(testCase)!.success)">
+                                                          {{ getStatusIcon(getTestStatus(testCase)!.success) }}
+                                                        </span>
+                                                        <span :class="getStatusClass(getTestStatus(testCase)!.success)">
+                                                          {{ getTestStatus(testCase)!.status }}
+                                                        </span>
+                                                      </div>
+                                                      <div v-else class="text-gray-400 text-sm">Not tested</div>
+                                                    </div>
+                                                    
+                                                    <!-- Actions -->
+                                                    <div class="flex items-center gap-2" @click.stop>
+                                                      <Button 
+                                                        :icon="isTestCaseExpanded(testCase) ? 'pi pi-chevron-down' : 'pi pi-chevron-right'"
+                                                        size="small"
+                                                        @click="toggleTestCaseExpansion(testCase)"
+                                                        severity="secondary"
+                                                        text
+                                                        :title="isTestCaseExpanded(testCase) ? 'Collapse' : 'Expand'"
+                                                      />
+                                                      <Button 
+                                                        label="Test" 
+                                                        size="small"
+                                                        @click="runSingleTest(testCase)"
+                                                        :loading="isTestRunning(testCase)"
+                                                        :disabled="isTestRunning(testCase) || isLoading"
+                                                      />
+                                                    </div>
+                                                  </div>
+                                                </div>
+                                                
+                                                <!-- Expansion content -->
+                                                <div v-if="isTestCaseExpanded(testCase)" 
+                                                     :class="index % 2 === 0 ? 'bg-blue-200 dark:bg-blue-900/40' : 'bg-blue-300 dark:bg-blue-900/50'"
+                                                     :style="index % 2 === 0 ? 'background-color: #2f323a' : 'background-color: #353942'"
+                                                     class="border-t border-gray-200 dark:border-gray-600 px-4 py-4">
+                                                  <div class="space-y-4">
+                                                    <!-- Path Variables -->
+                                                    <div v-if="testCase.pathVariables && testCase.pathVariables.length > 0">
+                                                      <h4 class="text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">Path Variables</h4>
+                                                      <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+                                                        <div v-for="variable in testCase.pathVariables" :key="variable" class="flex items-center gap-2">
+                                                          <label class="text-sm text-gray-600 dark:text-gray-400 min-w-[100px]">{{ variable }}:</label>
+                                                          <InputText 
+                                                            v-model="testCasePathVariableValues[getTestCaseId(testCase)][variable]"
+                                                            :placeholder="`Value for ${variable}`"
+                                                            class="flex-1"
+                                                            size="small"
+                                                          />
+                                                        </div>
+                                                      </div>
+                                                    </div>
+                                                    
+                                                    <!-- Query Parameters -->
+                                                    <div v-if="testCase.parameters && testCase.parameters.filter((p: any) => p.in === 'query').length > 0">
+                                                      <h4 class="text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">Query Parameters</h4>
+                                                      <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+                                                        <div v-for="param in testCase.parameters.filter((p: any) => p.in === 'query')" :key="param.name" class="flex items-center gap-2">
+                                                          <label class="text-sm text-gray-600 dark:text-gray-400 min-w-[100px]">{{ param.name }}:</label>
+                                                          <InputText 
+                                                            v-model="testCaseQueryParameterValues[getTestCaseId(testCase)][param.name]"
+                                                            :placeholder="`Value for ${param.name}`"
+                                                            class="flex-1"
+                                                            size="small"
+                                                          />
+                                                        </div>
+                                                      </div>
+                                                    </div>
+                                                    
+                                                    <!-- Body Variables -->
+                                                    <div v-if="testCase.bodyVariables && Object.keys(testCase.bodyVariables).length > 0">
+                                                      <h4 class="text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">Body Variables</h4>
+                                                      <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+                                                        <div v-for="[key, value] in Object.entries(testCase.bodyVariables)" :key="key" class="flex items-center gap-2">
+                                                          <label class="text-sm text-gray-600 dark:text-gray-400 min-w-[100px]">{{ key }}:</label>
+                                                          <InputText 
+                                                            v-model="testCaseBodyVariableValues[getTestCaseId(testCase)][key]"
+                                                            :placeholder="`Value for ${key}`"
+                                                            class="flex-1"
+                                                            size="small"
+                                                          />
+                                                        </div>
+                                                      </div>
+                                                    </div>
+                                                    
+                                                    <div v-if="(!testCase.pathVariables || testCase.pathVariables.length === 0) && (!testCase.parameters || testCase.parameters.filter((p: any) => p.in === 'query').length === 0) && (!testCase.bodyVariables || Object.keys(testCase.bodyVariables).length === 0)">
+                                                      <p class="text-sm text-gray-500 dark:text-gray-400">No variables to configure for this endpoint.</p>
+                                                    </div>
+                                                  </div>
+                                                </div>
+                                              </div>
+                                            </div>
+                                          </div>
                   </template>
                 </Card>
               </div>
@@ -2770,15 +3030,8 @@ onMounted(() => {
              sidebarOpen ? 'translate-x-0' : 'translate-x-full'
            ]">
         <div class="p-4">
-          <div class="flex items-center justify-between mb-4">
-            <h3 class="text-lg font-semibold text-gray-800 dark:text-gray-200">Request Configuration</h3>
-            <Button 
-              icon="pi pi-times"
-              @click="toggleSidebar"
-              size="small"
-              text
-              rounded
-            />
+          <div class="mb-4">
+            <h3 class="text-lg font-semibold text-gray-800 dark:text-gray-200">Global Variables</h3>
           </div>
           
                                 <!-- Path Variables Section -->
@@ -2841,7 +3094,7 @@ onMounted(() => {
             </div>
             
             <div class="space-y-3">
-              <div v-for="(value, key) in bodyVariableValues" :key="key" class="space-y-2">
+              <div v-for="[key, value] in sortedBodyVariables" :key="key" class="space-y-2">
                 <div class="flex items-center justify-between">
                   <label class="block text-sm font-medium text-gray-700 dark:text-gray-300">
                     {{ key }}
