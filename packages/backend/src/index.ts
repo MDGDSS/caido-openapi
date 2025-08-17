@@ -741,9 +741,8 @@ const executeTest = async (sdk: SDK, testCase: TestCase, options: TestOptions, p
   }
 };
 
-const runAllTests = async (sdk: SDK, schemaText: string, baseUrl: string, options: Partial<TestOptions> = {}, pathVariableValues?: Record<string, string[]>): Promise<TestResult[]> => {
+const runAllTests = async (sdk: SDK, schema: OpenAPISchema, baseUrl: string, options: Partial<TestOptions> = {}, pathVariableValues?: Record<string, string[]>): Promise<TestResult[]> => {
   try {
-    const schema = parseOpenAPISchema(sdk, schemaText);
     const testCases = generateTestCases(sdk, schema);
     const results: TestResult[] = [];
     
@@ -837,9 +836,8 @@ const generateTestCombinations = (testCase: TestCase, pathVariableValues?: Recor
   return combinations;
 };
 
-const runSpecificTests = async (sdk: SDK, schemaText: string, baseUrl: string, testNames: string[]): Promise<TestResult[]> => {
+const runSpecificTests = async (sdk: SDK, schema: OpenAPISchema, baseUrl: string, testNames: string[]): Promise<TestResult[]> => {
   try {
-    const schema = parseOpenAPISchema(sdk, schemaText);
     const allTestCases = generateTestCases(sdk, schema);
     const filteredTestCases = allTestCases.filter(testCase => 
       testNames.some(name => testCase.name.includes(name) || testCase.path.includes(name))

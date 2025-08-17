@@ -180,6 +180,216 @@ const allTestResults = computed(() => {
   });
 });
 
+// Frontend schema parsing and test case generation functions to avoid RPC payload size issues
+const parseOpenAPISchemaLocally = (schemaText: string): any => {
+  try {
+    const schema = JSON.parse(schemaText);
+    return schema;
+  } catch (error) {
+    throw new Error(`Failed to parse OpenAPI schema: ${error}`);
+  }
+};
+
+const extractPathVariables = (path: string): string[] => {
+  const pathVariableRegex = /\{([^}]+)\}/g;
+  const variables: string[] = [];
+  let match;
+  
+  while ((match = pathVariableRegex.exec(path)) !== null) {
+    if (match[1]) {
+      variables.push(match[1]);
+    }
+  }
+  
+  return variables;
+};
+
+const getExpectedStatus = (operation: any): number => {
+  if (operation.responses) {
+    const statusCodes = Object.keys(operation.responses);
+    for (const code of statusCodes) {
+      if (code.startsWith('2')) return parseInt(code);
+    }
+    return parseInt(statusCodes[0]) || 200;
+  }
+  return 200;
+};
+
+const generateExampleValue = (schema: any, depth: number = 0, parsedSchema?: any): any => {
+  if (depth > 3) return null; // Prevent infinite recursion
+  
+  if (schema.example !== undefined) return schema.example;
+  if (schema.default !== undefined) return schema.default;
+  
+  const type = schema.type || 'string';
+  
+  switch (type) {
+    case 'string':
+      if (schema.enum && schema.enum.length > 0) return schema.enum[0];
+      if (schema.format === 'email') return 'user@example.com';
+      if (schema.format === 'date') return '2023-01-01';
+      if (schema.format === 'date-time') return '2023-01-01T00:00:00Z';
+      if (schema.format === 'uuid') return '123e4567-e89b-12d3-a456-426614174000';
+      return 'string';
+    case 'integer':
+    case 'number':
+      return 0;
+    case 'boolean':
+      return true;
+    case 'array':
+      if (schema.items) {
+        const itemValue = generateExampleValue(schema.items, depth + 1, parsedSchema);
+        return itemValue !== null ? [itemValue] : [];
+      }
+      return [];
+    case 'object':
+      if (schema.properties) {
+        const obj: any = {};
+        for (const [propName, propSchema] of Object.entries(schema.properties)) {
+          const value = generateExampleValue(propSchema as any, depth + 1, parsedSchema);
+          if (value !== null) obj[propName] = value;
+        }
+        return obj;
+      }
+      return {};
+    default:
+      return 'string';
+  }
+};
+
+const extractBodyVariables = (schema: any, parsedSchema: any): Record<string, any> => {
+  const variables: Record<string, any> = {};
+  
+  // Handle $ref
+  if (schema.$ref) {
+    const refName = schema.$ref.split('/').pop();
+    const refSchema = parsedSchema.definitions?.[refName] || parsedSchema.components?.schemas?.[refName];
+    if (refSchema && refSchema.properties) {
+      for (const [propName, propSchema] of Object.entries(refSchema.properties)) {
+        variables[propName] = generateExampleValue(propSchema as any, 0, parsedSchema);
+      }
+    }
+    return variables;
+  }
+  
+  // Handle direct properties
+  if (schema.properties) {
+    for (const [propName, propSchema] of Object.entries(schema.properties)) {
+      variables[propName] = generateExampleValue(propSchema as any, 0, parsedSchema);
+    }
+  }
+  
+  return variables;
+};
+
+const generateTestCasesLocally = (schema: any): any[] => {
+  const testCases: any[] = [];
+  
+  for (const [path, methods] of Object.entries(schema.paths)) {
+    for (const [method, operation] of Object.entries(methods as any)) {
+      if (method.toLowerCase() === 'get' || method.toLowerCase() === 'post' || 
+          method.toLowerCase() === 'put' || method.toLowerCase() === 'delete' || method.toLowerCase() === 'patch') {
+        
+        // Extract path variables from the path
+        const pathVariables = extractPathVariables(path);
+        
+        // Extract body parameters for Swagger 2.0
+        let bodyParameter = null;
+        let bodyVariables: Record<string, any> = {};
+        
+        if (operation.parameters) {
+          for (const param of operation.parameters) {
+            if (param.in === 'body' && param.schema) {
+              bodyParameter = param.schema;
+              // Extract body variables from schema
+              bodyVariables = extractBodyVariables(param.schema, schema);
+              break;
+            }
+          }
+        }
+        
+        // For OpenAPI 3.x requestBody
+        if (operation.requestBody?.content) {
+          const content = operation.requestBody.content;
+          const mediaType = Object.keys(content)[0] || 'application/json';
+          const requestBodySchema = content[mediaType]?.schema;
+          if (requestBodySchema) {
+            bodyVariables = extractBodyVariables(requestBodySchema, schema);
+          }
+        }
+        
+        const testCase = {
+          path,
+          method: method.toUpperCase(),
+          name: `${method.toUpperCase()} ${path}`,
+          description: operation.summary || operation.description || `Test ${method.toUpperCase()} ${path}`,
+          parameters: operation.parameters || [],
+          requestBody: operation.requestBody || bodyParameter,
+          expectedStatus: getExpectedStatus(operation),
+          pathVariables,
+          bodyVariables,
+          originalPath: path
+        };
+        
+        testCases.push(testCase);
+      }
+    }
+  }
+  
+  return testCases;
+};
+
+// Frontend schema validation function
+const validateSchemaLocally = (schemaText: string): { valid: boolean; errors: string[] } => {
+  const errors: string[] = [];
+  
+  try {
+    const schema = JSON.parse(schemaText);
+    
+    // Check for OpenAPI or Swagger version field
+    if (!schema.openapi && !schema.swagger) {
+      errors.push("Missing 'openapi' or 'swagger' version field");
+    }
+    
+    if (!schema.info) {
+      errors.push("Missing 'info' section");
+    } else {
+      if (!schema.info.title) errors.push("Missing 'info.title'");
+      if (!schema.info.version) errors.push("Missing 'info.version'");
+    }
+    
+    if (!schema.paths || Object.keys(schema.paths).length === 0) {
+      errors.push("Missing or empty 'paths' section");
+    }
+    
+    // Additional validation
+    if (schema.paths) {
+      for (const [path, methods] of Object.entries(schema.paths)) {
+        if (typeof methods !== 'object' || methods === null) {
+          errors.push(`Invalid path definition for '${path}'`);
+          continue;
+        }
+        
+        for (const [method, operation] of Object.entries(methods)) {
+          if (typeof operation !== 'object' || operation === null) {
+            errors.push(`Invalid operation definition for ${method.toUpperCase()} ${path}`);
+          }
+        }
+      }
+    }
+    
+    return {
+      valid: errors.length === 0,
+      errors
+    };
+  } catch (error) {
+    return {
+      valid: false,
+      errors: [`Invalid JSON: ${error}`]
+    };
+  }
+};
+
 // Methods
 const loadSampleSchema = () => {
   schemaText.value = sampleSchema;
@@ -192,18 +402,18 @@ const loadSchema = async () => {
   }
 
   try {
-    // First validate the schema
-    validationResult.value = await sdk.backend.validateSchema(schemaText.value);
+    // First validate the schema locally to avoid RPC payload size issues
+    validationResult.value = validateSchemaLocally(schemaText.value);
     
     if (validationResult.value.valid) {
-      // Parse the schema to get the OpenAPI object
-      const schema = await sdk.backend.parseOpenAPISchema(schemaText.value);
+      // Parse the schema locally to avoid RPC payload size issues
+      const schema = parseOpenAPISchemaLocally(schemaText.value);
       
       // Store parsed schema for definition viewer
       parsedSchema.value = schema;
       
-      // Generate test cases from the parsed schema
-      const cases = await sdk.backend.generateTestCases(schema);
+      // Generate test cases locally to avoid RPC payload size issues
+      const cases = generateTestCasesLocally(schema);
       testCases.value = cases;
       isSchemaLoaded.value = true;
       activeTab.value = 1; // Switch to test cases tab
@@ -293,7 +503,8 @@ const validateSchema = async () => {
   }
 
   try {
-    validationResult.value = await sdk.backend.validateSchema(schemaText.value);
+    // Use local validation to avoid RPC payload size issues
+    validationResult.value = validateSchemaLocally(schemaText.value);
   } catch (error) {
     validationResult.value = { valid: false, errors: [error instanceof Error ? error.message : "Validation failed"] };
   }
@@ -330,9 +541,9 @@ const runAllTests = async () => {
       useParameterFromDefinition: useParameterFromDefinition.value
     };
     
-    // Get all test cases first
-    const schema = await sdk.backend.parseOpenAPISchema(schemaText.value);
-    const testCases = await sdk.backend.generateTestCases(schema);
+    // Get all test cases locally to avoid RPC payload size issues
+    const schema = parseOpenAPISchemaLocally(schemaText.value);
+    const testCases = generateTestCasesLocally(schema);
     
     // Use filtered test cases if search is active
     const testCasesToRun = endpointSearchQuery.value.trim() ? displayTestCases.value : testCases;
@@ -1391,81 +1602,7 @@ const findPossibleObjectDefinitions = (schema: any, context?: any): any[] => {
   return candidates;
 };
 
-// Generate example value for schema (like Swagger UI)
-const generateExampleValue = (schema: any, depth: number = 0): any => {
-  if (depth > 10) return '...'; // Much higher limit for complex schemas
-  
-  // Handle $ref
-  if (schema.$ref) {
-    const refName = schema.$ref.split('/').pop();
-    // Try to find the referenced schema
-    const refSchema = parsedSchema.value?.components?.schemas?.[refName] || 
-                     parsedSchema.value?.definitions?.[refName];
-    if (refSchema) {
-      return generateExampleValue(refSchema, depth + 1);
-    }
-    return `{${refName}}`;
-  }
-  
-  // Handle basic types
-  if (schema.type) {
-    switch (schema.type) {
-      case 'string':
-        if (schema.format === 'date-time') return '2025-08-02T16:56:40.491Z';
-        if (schema.format === 'date') return '2025-08-02';
-        if (schema.format === 'email') return 'user@example.com';
-        if (schema.enum) return schema.enum[0];
-        if (schema.example) return schema.example;
-        return 'string';
-      case 'integer':
-      case 'number':
-        if (schema.example) return schema.example;
-        if (schema.default) return schema.default;
-        return 0;
-      case 'boolean':
-        if (schema.example) return schema.example;
-        return true;
-      case 'array':
-        if (schema.items) {
-          const itemExample = generateExampleValue(schema.items, depth + 1);
-          return [itemExample];
-        }
-        return [];
-      case 'object':
-        if (schema.properties) {
-          const obj: any = {};
-          for (const [propName, propSchema] of Object.entries(schema.properties)) {
-            obj[propName] = generateExampleValue(propSchema as any, depth + 1);
-          }
-          return obj;
-        }
-        if (schema.additionalProperties) {
-          // For additionalProperties in Definition tab, just generate a realistic example
-          // without trying to find a "better" definition, since we want to show the actual schema
-          const additionalPropType = generateExampleValue(schema.additionalProperties, depth + 1);
-          return {
-            'id': typeof additionalPropType === 'number' ? 1 : 'example',
-            'name': typeof additionalPropType === 'string' ? 'example' : 'Example Name',
-            'value': additionalPropType,
-            'enabled': typeof additionalPropType === 'boolean' ? true : false
-          };
-        }
-        return {};
-    }
-  }
-  
-  // Handle enums
-  if (schema.enum) {
-    return schema.enum[0];
-  }
-  
-  // Handle examples
-  if (schema.example) {
-    return schema.example;
-  }
-  
-  return 'example';
-};
+
 
 // Format example value as JSON string
 const formatExampleValue = (schema: any): string => {

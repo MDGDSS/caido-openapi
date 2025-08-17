@@ -12,8 +12,8 @@ export interface FrontendSDK {
     parseOpenAPISchema: (schemaText: string) => Promise<any>;
     generateTestCases: (schema: any) => Promise<any[]>;
     executeTest: (testCase: any, options: any, pathVariableValues?: any) => Promise<any>;
-    runAllTests: (schemaText: string, baseUrl: string, options?: any, pathVariableValues?: any) => Promise<any[]>;
-    runSpecificTests: (schemaText: string, baseUrl: string, testNames: string[]) => Promise<any[]>;
+    runAllTests: (schema: any, baseUrl: string, options?: any, pathVariableValues?: any) => Promise<any[]>;
+    runSpecificTests: (schema: any, baseUrl: string, testNames: string[]) => Promise<any[]>;
     runSingleTest: (testCase: any, baseUrl: string, options?: any, pathVariableValues?: any, bodyVariableValues?: any) => Promise<any>;
     validateSchema: (schemaText: string) => Promise<{ valid: boolean; errors: string[] }>;
     getSchemaInfo: (schemaText: string) => Promise<{ title: string; version: string; description?: string; pathCount: number; methodCount: number }>;
