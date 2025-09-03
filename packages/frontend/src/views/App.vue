@@ -362,16 +362,18 @@ const validateSchemaLocally = (schemaText: string): { valid: boolean; errors: st
       errors.push("Missing 'openapi' or 'swagger' version field");
     }
     
+    /**
     if (!schema.info) {
       errors.push("Missing 'info' section");
     } else {
       if (!schema.info.title) errors.push("Missing 'info.title'");
       if (!schema.info.version) errors.push("Missing 'info.version'");
-    }
+    } 
     
     if (!schema.paths || Object.keys(schema.paths).length === 0) {
       errors.push("Missing or empty 'paths' section");
     }
+    **/
     
     // Additional validation
     if (schema.paths) {
