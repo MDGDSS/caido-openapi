@@ -1284,6 +1284,49 @@ const addPathVariableValue = (variable: string) => {
   }
 };
 
+// Helper function to parse multi-line input
+const parseMultiLineInput = (input: string): string[] => {
+  return input
+    .split('\n')
+    .map(line => line.trim())
+    .filter(line => line.length > 0);
+};
+
+// Handle multi-line paste for path variables
+const handlePathVariablePaste = (variable: string, event: ClipboardEvent) => {
+  const pastedText = event.clipboardData?.getData('text') || '';
+  const lines = parseMultiLineInput(pastedText);
+  
+  if (lines.length > 1) {
+    event.preventDefault(); // Prevent default paste behavior
+    
+    // Initialize if not exists
+    if (!pathVariableValues.value[variable]) {
+      pathVariableValues.value[variable] = [];
+    }
+    
+    // Add all lines as separate values
+    pathVariableValues.value[variable].push(...lines);
+  }
+};
+
+// Handle multi-line paste for body variables
+const handleBodyVariablePaste = (key: string, event: ClipboardEvent) => {
+  const pastedText = event.clipboardData?.getData('text') || '';
+  const lines = parseMultiLineInput(pastedText);
+  
+  if (lines.length > 1) {
+    event.preventDefault(); // Prevent default paste behavior
+    
+    // For body variables, we'll create multiple entries with the same key
+    // but with different values. We'll use a special format: key_1, key_2, etc.
+    lines.forEach((line, index) => {
+      const newKey = index === 0 ? key : `${key}_${index + 1}`;
+      bodyVariableValues.value[newKey] = line;
+    });
+  }
+};
+
 const removePathVariableValue = (variable: string, index: number) => {
   if (pathVariableValues.value[variable] && pathVariableValues.value[variable].length > 1) {
     pathVariableValues.value[variable].splice(index, 1);
@@ -3068,6 +3111,7 @@ onMounted(() => {
                       v-model="pathVariableValues[variable][index]"
                       :placeholder="`Value ${index + 1} for ${variable}`"
                       class="flex-1"
+                      @paste="handlePathVariablePaste(variable, $event)"
                     />
                     <Button 
                       v-if="getPathVariableValue(variable).length > 1"
@@ -3108,6 +3152,7 @@ onMounted(() => {
                     v-model="bodyVariableValues[key]"
                     :placeholder="`Value for ${key}`"
                     class="w-full"
+                    @paste="handleBodyVariablePaste(key, $event)"
                   />
                 </div>
               </div>
