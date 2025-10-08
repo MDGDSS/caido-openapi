@@ -31,7 +31,7 @@ const activeTab = ref(0);
 const testCases = ref<any[]>([]);
 const isSchemaLoaded = ref(false);
 const pathVariableValues = ref<Record<string, string[]>>({});
-const bodyVariableValues = ref<Record<string, any>>({});
+const bodyVariableValues = ref<Record<string, string[]>>({});
 const runningTests = ref<Set<string>>(new Set());
 const sidebarOpen = ref(true);
 const customHeaders = ref("");
@@ -452,7 +452,7 @@ const loadSchema = async () => {
       cases.forEach(testCase => {
         if (testCase.bodyVariables) {
           Object.entries(testCase.bodyVariables).forEach(([key, value]) => {
-            bodyVariableValues.value[key] = value;
+            bodyVariableValues.value[key] = [String(value)];
           });
         }
       });
@@ -601,26 +601,49 @@ const runAllTests = async () => {
       if (stopTestRequested.value) break;
       
       // Generate combinations for this test case
-      const variableCombinations = generatePathVariableCombinations(testCase);
+      const pathVariableCombinations = generatePathVariableCombinations(testCase);
+      const bodyVariableCombinations = generateBodyVariableCombinations(testCase);
       
-      if (variableCombinations.length === 0) {
-        // No path variables, run single test
+      // If no combinations for either, run single test
+      if (pathVariableCombinations.length === 0 && bodyVariableCombinations.length === 0) {
         const bodyVars = getTestCaseBodyVariables(testCase);
         const queryVars = getTestCaseQueryParameters(testCase);
         const result = await sdk.backend.runSingleTest(toMinimalTestCase(testCase), baseUrl.value, options, {}, bodyVars, queryVars);
         updateTestCaseResult(testCase, result);
       } else {
+        // Generate all combinations of path and body variables
+        const allCombinations: Array<{pathVars: any, bodyVars: any}> = [];
+        
+        if (pathVariableCombinations.length === 0) {
+          // Only body variable combinations
+          bodyVariableCombinations.forEach(bodyVars => {
+            allCombinations.push({ pathVars: {}, bodyVars });
+          });
+        } else if (bodyVariableCombinations.length === 0) {
+          // Only path variable combinations
+          pathVariableCombinations.forEach(pathVars => {
+            allCombinations.push({ pathVars, bodyVars: getTestCaseBodyVariables(testCase) });
+          });
+        } else {
+          // Both path and body variable combinations
+          pathVariableCombinations.forEach(pathVars => {
+            bodyVariableCombinations.forEach(bodyVars => {
+              allCombinations.push({ pathVars, bodyVars });
+            });
+          });
+        }
+        
         // Run test for each combination
-        for (const combination of variableCombinations) {
+        for (let i = 0; i < allCombinations.length; i++) {
+          const { pathVars, bodyVars } = allCombinations[i];
           if (stopTestRequested.value) break;
           
-          const bodyVars = getTestCaseBodyVariables(testCase);
           const queryVars = getTestCaseQueryParameters(testCase);
-          const result = await sdk.backend.runSingleTest(toMinimalTestCase(testCase), baseUrl.value, options, combination, bodyVars, queryVars);
-          updateTestCaseResult(testCase, result, combination);
+          const result = await sdk.backend.runSingleTest(toMinimalTestCase(testCase), baseUrl.value, options, pathVars, bodyVars, queryVars);
+          updateTestCaseResult(testCase, result, pathVars);
           
           // Add delay between requests if specified
-          if (delayBetweenRequests.value > 0 && combination !== variableCombinations[variableCombinations.length - 1]) {
+          if (delayBetweenRequests.value > 0 && i < allCombinations.length - 1) {
             await new Promise(resolve => setTimeout(resolve, delayBetweenRequests.value));
           }
         }
@@ -658,27 +681,50 @@ const runSingleTest = async (testCase: any) => {
     };
     
     // Get all combinations of path variable values
-    const variableCombinations = generatePathVariableCombinations(testCase);
+    const pathVariableCombinations = generatePathVariableCombinations(testCase);
+    // Generate body variable combinations
+    const bodyVariableCombinations = generateBodyVariableCombinations(testCase);
     
-    if (variableCombinations.length === 0) {
-      // No path variables or no values, run single test
+    // If no combinations for either, run single test
+    if (pathVariableCombinations.length === 0 && bodyVariableCombinations.length === 0) {
       const bodyVars = getTestCaseBodyVariables(testCase);
       const queryVars = getTestCaseQueryParameters(testCase);
       const result = await sdk.backend.runSingleTest(toMinimalTestCase(testCase), baseUrl.value, options, {}, bodyVars, queryVars);
       updateTestCaseResult(testCase, result);
     } else {
+      // Generate all combinations of path and body variables
+      const allCombinations: Array<{pathVars: any, bodyVars: any}> = [];
+      
+      if (pathVariableCombinations.length === 0) {
+        // Only body variable combinations
+        bodyVariableCombinations.forEach(bodyVars => {
+          allCombinations.push({ pathVars: {}, bodyVars });
+        });
+      } else if (bodyVariableCombinations.length === 0) {
+        // Only path variable combinations
+        pathVariableCombinations.forEach(pathVars => {
+          allCombinations.push({ pathVars, bodyVars: getTestCaseBodyVariables(testCase) });
+        });
+      } else {
+        // Both path and body variable combinations
+        pathVariableCombinations.forEach(pathVars => {
+          bodyVariableCombinations.forEach(bodyVars => {
+            allCombinations.push({ pathVars, bodyVars });
+          });
+        });
+      }
+      
       // Run test for each combination
-      for (let i = 0; i < variableCombinations.length; i++) {
-        const combination = variableCombinations[i];
+      for (let i = 0; i < allCombinations.length; i++) {
+        const { pathVars, bodyVars } = allCombinations[i];
         if (stopTestRequested.value) break;
         
-        const bodyVars = getTestCaseBodyVariables(testCase);
         const queryVars = getTestCaseQueryParameters(testCase);
-        const result = await sdk.backend.runSingleTest(toMinimalTestCase(testCase), baseUrl.value, options, combination, bodyVars, queryVars);
-        updateTestCaseResult(testCase, result, combination);
+        const result = await sdk.backend.runSingleTest(toMinimalTestCase(testCase), baseUrl.value, options, pathVars, bodyVars, queryVars);
+        updateTestCaseResult(testCase, result, pathVars);
         
         // Add delay between requests if specified
-        if (delayBetweenRequests.value > 0 && i < variableCombinations.length - 1) {
+        if (delayBetweenRequests.value > 0 && i < allCombinations.length - 1) {
           await new Promise(resolve => setTimeout(resolve, delayBetweenRequests.value));
         }
       }
@@ -1284,11 +1330,29 @@ const addPathVariableValue = (variable: string) => {
   }
 };
 
+const addBodyVariableValue = (variable: string) => {
+  if (!bodyVariableValues.value[variable]) {
+    bodyVariableValues.value[variable] = [''];
+  } else {
+    bodyVariableValues.value[variable].push('');
+  }
+};
+
+const removeBodyVariableValue = (variable: string, index: number) => {
+  if (bodyVariableValues.value[variable] && bodyVariableValues.value[variable].length > 1) {
+    bodyVariableValues.value[variable].splice(index, 1);
+  }
+};
+
+const getBodyVariableValue = (variable: string): string[] => {
+  return bodyVariableValues.value[variable] || [''];
+};
+
 // Helper function to parse multi-line input
 const parseMultiLineInput = (input: string): string[] => {
   return input
     .split('\n')
-    .map(line => line.trim())
+    .map(line => String(line).trim())
     .filter(line => line.length > 0);
 };
 
@@ -1318,12 +1382,13 @@ const handleBodyVariablePaste = (key: string, event: ClipboardEvent) => {
   if (lines.length > 1) {
     event.preventDefault(); // Prevent default paste behavior
     
-    // For body variables, we'll create multiple entries with the same key
-    // but with different values. We'll use a special format: key_1, key_2, etc.
-    lines.forEach((line, index) => {
-      const newKey = index === 0 ? key : `${key}_${index + 1}`;
-      bodyVariableValues.value[newKey] = line;
-    });
+    // Initialize if not exists
+    if (!bodyVariableValues.value[key]) {
+      bodyVariableValues.value[key] = [];
+    }
+    
+    // Add all lines as separate values
+    bodyVariableValues.value[key].push(...lines);
   }
 };
 
@@ -1414,9 +1479,9 @@ const getTestCaseBodyVariableValue = (testCase: any, key: string) => {
   if (testCaseValue !== undefined && testCaseValue !== '') {
     return testCaseValue;
   }
-  // Return sidebar value as fallback
-  if (bodyVariableValues.value[key] !== undefined) {
-    return bodyVariableValues.value[key];
+  // Return sidebar value as fallback (first value from array)
+  if (bodyVariableValues.value[key] && bodyVariableValues.value[key].length > 0) {
+    return bodyVariableValues.value[key][0];
   }
   // Return default value from test case
   return testCase.bodyVariables[key] || '';
@@ -1431,10 +1496,10 @@ const getTestCaseBodyVariables = (testCase: any) => {
     Object.assign(bodyVars, testCase.bodyVariables);
   }
   
-  // Override with sidebar values (fallback)
-  Object.entries(bodyVariableValues.value).forEach(([key, value]) => {
-    if (value !== undefined && value !== '') {
-      bodyVars[key] = value;
+  // Override with sidebar values (fallback) - use first value from array
+  Object.entries(bodyVariableValues.value).forEach(([key, values]) => {
+    if (values && values.length > 0 && values[0] !== '') {
+      bodyVars[key] = values[0];
     }
   });
   
@@ -1448,6 +1513,64 @@ const getTestCaseBodyVariables = (testCase: any) => {
   }
   
   return bodyVars;
+};
+
+// Generate all possible combinations of body variables
+const generateBodyVariableCombinations = (testCase: any) => {
+  const testCaseId = getTestCaseId(testCase);
+  const combinations: Record<string, any>[] = [];
+  
+  // Get all body variables that have multiple values
+  const bodyVarsWithMultipleValues: Record<string, string[]> = {};
+  
+  // Check sidebar values
+  Object.entries(bodyVariableValues.value).forEach(([key, values]) => {
+    const validValues = values.filter(v => v && typeof v === 'string' && v.trim() !== '');
+    if (validValues.length > 1) {
+      bodyVarsWithMultipleValues[key] = validValues;
+    }
+  });
+  
+  // Check test case specific values
+  if (testCaseBodyVariableValues.value[testCaseId]) {
+    Object.entries(testCaseBodyVariableValues.value[testCaseId]).forEach(([key, values]) => {
+      if (Array.isArray(values)) {
+        const validValues = values.filter(v => v && typeof v === 'string' && v.trim() !== '');
+        if (validValues.length > 1) {
+          bodyVarsWithMultipleValues[key] = validValues;
+        }
+      }
+    });
+  }
+  
+  // If no multiple values, return single combination
+  if (Object.keys(bodyVarsWithMultipleValues).length === 0) {
+    return [getTestCaseBodyVariables(testCase)];
+  }
+  
+  // Generate all combinations
+  const keys = Object.keys(bodyVarsWithMultipleValues);
+  const values = Object.values(bodyVarsWithMultipleValues);
+  
+  // Generate cartesian product
+  const generateCombinations = (index: number, currentCombination: Record<string, any>) => {
+    if (index === keys.length) {
+      // Add default values for other body variables
+      const finalCombination = { ...getTestCaseBodyVariables(testCase), ...currentCombination };
+      combinations.push(finalCombination);
+      return;
+    }
+    
+    const key = keys[index];
+    const keyValues = values[index];
+    
+    for (const value of keyValues) {
+      generateCombinations(index + 1, { ...currentCombination, [key]: value });
+    }
+  };
+  
+  generateCombinations(0, {});
+  return combinations;
 };
 
 const getTestCaseQueryParameters = (testCase: any) => {
@@ -3145,15 +3268,34 @@ onMounted(() => {
                   <label class="block text-sm font-medium text-gray-700 dark:text-gray-300">
                     {{ key }}
                   </label>
+                  <Button 
+                    label="Add Value"
+                    icon="pi pi-plus"
+                    @click="addBodyVariableValue(key)"
+                    size="small"
+                    severity="success"
+                    class="text-xs px-2 py-1"
+                  />
                 </div>
                 
                 <div class="space-y-2">
-                  <InputText 
-                    v-model="bodyVariableValues[key]"
-                    :placeholder="`Value for ${key}`"
-                    class="w-full"
-                    @paste="handleBodyVariablePaste(key, $event)"
-                  />
+                  <div v-for="(value, index) in getBodyVariableValue(key)" :key="index" class="flex items-center gap-2">
+                    <InputText 
+                      v-model="bodyVariableValues[key][index]"
+                      :placeholder="`Value ${index + 1} for ${key}`"
+                      class="flex-1"
+                      @paste="handleBodyVariablePaste(key, $event)"
+                    />
+                    <Button 
+                      v-if="getBodyVariableValue(key).length > 1"
+                      label="Remove"
+                      icon="pi pi-trash"
+                      @click="removeBodyVariableValue(key, index)"
+                      size="small"
+                      severity="danger"
+                      class="text-xs px-2 py-1"
+                    />
+                  </div>
                 </div>
               </div>
             </div>

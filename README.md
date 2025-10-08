@@ -1,21 +1,44 @@
 # OpenAPI Extension for Caido
 
-A powerful Caido extension that allow to easily test OpenAPI schemas by generating and executing test cases against your API endpoints.
+Test your API endpoints easily with this Caido extension. Just import your OpenAPI spec or Postman collection and start testing!
 
-<img width="2829" height="1842" alt="default page" src="https://github.com/user-attachments/assets/4121de42-b673-4379-903c-6db744f805c1" />
+https://github.com/user-attachments/assets/522d5a5e-1518-4ac5-98c9-5e8be380dd2c
 
-## Features
+## What it does
 
-- **Schema Validation**: Validates OpenAPI schemas for correctness and completeness
-- **Real-time Testing**: Executes tests against your API endpoints and provides detailed results
-- **Beautiful UI**: Modern, responsive interface with real-time feedback
-- **generate complex test** : Provide multiple values per variable to create complex tests
+This extension helps you test your API endpoints by importing OpenAPI specs or Postman collections. You can set up different values for variables and it will test all combinations automatically. You can also search for specific endpoints you want to test.
 
-## Usage
+## Key Features
 
-- Paste your OpenAPI schema (JSON format) into the text area
-- The extension will automatically validate the schema and show request you can run
-- Use multiple values per variable to create multiple test case
+- **Import anything**: Works with OpenAPI specs and Postman collections
+- **Test with variables**: Set different values for variables and test all combinations
+- **Find what you need**: Search for specific endpoints by keyword
+- **See results**: View all your test results in a clean tab
+- **Send to Replay**: Click on results to create a collection in Replay
+- **Check schemas**: Look at your API definitions in a dedicated tab
+
+https://github.com/user-attachments/assets/1937791b-1cc4-49e0-952c-4220648d7b71
+
+## How to use it
+
+1. **Add your API spec**: Paste your OpenAPI JSON or import a Postman collection
+2. **Set up variables**: Add different values you want to test. There are two types:
+   - **General variables**: Used automatically everywhere in your tests
+   - **Local variables**: Set directly on specific tests and override the general values
+3. **Find endpoints**: Search for the specific API paths you want to test
+4. **Run tests**: The extension will test all your combinations automatically. You can configure:
+   - **Delay between requests**: Set how long to wait between each test
+   - **Worker numbers**: Control how many tests run at the same time
+   - **Custom headers**: Add authorization tokens, cookies, or other headers
+
+https://github.com/user-attachments/assets/786ad79a-333e-4638-ba83-2700dd4e079f
+
+5. **Check results**: See all your test results in the results tab
+6. **Send to Replay**: Click on any result to create a collection in Replay
+
+https://github.com/user-attachments/assets/9bb357c5-70de-4ed5-b72d-3e6783adcc9a
+
+
 
 ## Contributing
 
