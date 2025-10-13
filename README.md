@@ -3,7 +3,7 @@
 Test your API endpoints easily with this Caido extension. Just import your OpenAPI spec or Postman collection and start testing!
 
 
-![image](https://github.com/user-attachments/assets/522d5a5e-1518-4ac5-98c9-5e8be380dd2c)
+![image](https://github.com/MDGDSS/caido-openapi/blob/main/Assets/1.gif?raw=true)
 
 
 ## What it does
@@ -21,7 +21,7 @@ This extension helps you test your API endpoints by importing OpenAPI specs or P
 
 
 
-![image](https://github.com/user-attachments/assets/1937791b-1cc4-49e0-952c-4220648d7b71)
+![image](https://github.com/MDGDSS/caido-openapi/blob/main/Assets/2.gif?raw=true)
 
 
 ## How to use it
@@ -38,14 +38,14 @@ This extension helps you test your API endpoints by importing OpenAPI specs or P
 
 
 
-![image](https://github.com/user-attachments/assets/786ad79a-333e-4638-ba83-2700dd4e079f)
+![image](https://github.com/MDGDSS/caido-openapi/blob/main/Assets/3.gif?raw=true)
 
 
 5. **Check results**: See all your test results in the results tab
 6. **Send to Replay**: Click on any result to create a collection in Replay
 
 
-![image](https://github.com/user-attachments/assets/9bb357c5-70de-4ed5-b72d-3e6783adcc9a)
+![image](https://github.com/MDGDSS/caido-openapi/blob/main/Assets/4.gif?raw=true)
 
 
 
