@@ -72,6 +72,8 @@ const sessions = ref<OpenAPISession[]>([]);
 const currentSessionId = ref<string | null>(null);
 const sessionCounter = ref<Record<string, number>>({});
 const currentProjectId = ref<string>('default');
+const editingSessionId = ref<string | null>(null);
+const editingSessionName = ref<string>('');
 
 // Reactive state (now session-specific)
 const schemaText = ref("");
@@ -227,7 +229,7 @@ const loadSession = async (sessionId: string) => {
   delayBetweenRequests.value = session.delayBetweenRequests || 100;
   timeout.value = session.timeout || 30000;
   useRandomValues.value = session.useRandomValues || false;
-  useParameterFromDefinition.value = session.useParameterFromDefinition || false;
+  useParameterFromDefinition.value = session.useParameterFromDefinition !== undefined ? session.useParameterFromDefinition : true;
   testResults.value = [...(session.testResults || [])];
   testCases.value = [...(session.testCases || [])];
   isSchemaLoaded.value = session.isSchemaLoaded || false;
@@ -241,6 +243,20 @@ const loadSession = async (sessionId: string) => {
   testCasePathVariableValues.value = { ...(session.testCasePathVariableValues || {}) };
   testCaseQueryParameterValues.value = { ...(session.testCaseQueryParameterValues || {}) };
   testCaseBodyVariableValues.value = { ...(session.testCaseBodyVariableValues || {}) };
+  
+  // Re-parse schema if it was loaded in this session
+  if (session.isSchemaLoaded && schemaText.value) {
+    try {
+      const schema = parseOpenAPISchemaLocally(schemaText.value);
+      parsedSchema.value = schema;
+    } catch (error) {
+      console.error('Failed to re-parse schema when loading session:', error);
+      parsedSchema.value = null;
+      isSchemaLoaded.value = false;
+    }
+  } else {
+    parsedSchema.value = null;
+  }
   
   currentSessionId.value = sessionId;
   
@@ -265,6 +281,50 @@ const deleteSession = async (sessionId: string) => {
   
   sessions.value.splice(sessionIndex, 1);
   await saveSessionsToStorage();
+};
+
+// Rename session functions
+const renameInputRef = ref<HTMLInputElement | null>(null);
+
+const startRenameSession = (sessionId: string) => {
+  const session = sessions.value.find(s => s.id === sessionId);
+  if (session) {
+    editingSessionId.value = sessionId;
+    editingSessionName.value = session.name;
+    // Focus the input after the next tick to ensure it's rendered
+    nextTick(() => {
+      // Use a more reliable way to find the input by looking for the editing session
+      const input = document.querySelector(`input[data-session-id="${sessionId}"]`) as HTMLInputElement;
+      if (input) {
+        input.focus();
+        input.select();
+      }
+    });
+  }
+};
+
+const cancelRenameSession = () => {
+  editingSessionId.value = null;
+  editingSessionName.value = '';
+};
+
+const saveRenameSession = async (sessionId: string) => {
+  const session = sessions.value.find(s => s.id === sessionId);
+  if (session && editingSessionName.value.trim()) {
+    session.name = editingSessionName.value.trim();
+    session.lastModified = new Date().toISOString();
+    await saveSessionsToStorage();
+  }
+  editingSessionId.value = null;
+  editingSessionName.value = '';
+};
+
+const handleRenameKeydown = async (event: KeyboardEvent, sessionId: string) => {
+  if (event.key === 'Enter') {
+    await saveRenameSession(sessionId);
+  } else if (event.key === 'Escape') {
+    cancelRenameSession();
+  }
 };
 
 const saveSessionsToStorage = async () => {
@@ -2607,20 +2667,54 @@ onMounted(async () => {
             v-for="session in sessions" 
             :key="session.id"
             :class="[
-              'flex items-center gap-2 px-3 py-1 rounded-md cursor-pointer transition-all duration-200',
+              'flex items-center gap-2 px-3 py-1 rounded-md transition-all duration-200',
               currentSessionId === session.id 
                 ? 'bg-blue-600 text-white border border-blue-500 shadow-md' 
                 : 'bg-white dark:bg-gray-600 text-gray-700 dark:text-gray-300 hover:bg-blue-50 dark:hover:bg-gray-500 border border-gray-200 dark:border-gray-500'
             ]"
-            @click="() => loadSession(session.id)"
           >
-            <span class="text-sm font-medium">{{ session.name }}</span>
+            <!-- Session name with rename functionality -->
+            <div 
+              v-if="editingSessionId !== session.id"
+              class="flex items-center gap-2 cursor-pointer flex-1 group"
+              @click="() => loadSession(session.id)"
+              @dblclick="() => startRenameSession(session.id)"
+              title="Click to select, double-click to rename"
+            >
+              <span class="text-sm font-medium">{{ session.name }}</span>
+              <!-- Rename hint icon - clickable -->
+              <i 
+                class="pi pi-pencil text-xs opacity-0 group-hover:opacity-60 transition-opacity ml-1 cursor-pointer hover:opacity-100"
+                :class="currentSessionId === session.id ? 'text-blue-200' : 'text-gray-400'"
+                title="Click to rename"
+                @click.stop="() => startRenameSession(session.id)"
+              ></i>
+            </div>
+            
+            <!-- Edit mode input -->
+            <input
+              v-else
+              v-model="editingSessionName"
+              @blur="() => saveRenameSession(session.id)"
+              @keydown="(e) => handleRenameKeydown(e, session.id)"
+              class="text-sm font-medium bg-transparent border-none outline-none flex-1 min-w-0 px-1 rounded"
+              :class="currentSessionId === session.id ? 'text-white bg-blue-500/20' : 'text-gray-700 dark:text-gray-300 bg-gray-100 dark:bg-gray-500'"
+              :data-session-id="session.id"
+              @click.stop
+            />
+            
+            <!-- Delete button with better visibility and spacing -->
             <button 
               @click.stop="() => deleteSession(session.id)"
-              class="text-gray-400 hover:text-red-500 transition-colors ml-1"
-              title="Kill Session"
+              :class="[
+                'ml-4 p-1.5 rounded-full border-2',
+                currentSessionId === session.id 
+                  ? 'text-white bg-red-500 border-red-500' 
+                  : 'text-white bg-red-500 border-red-500'
+              ]"
+              title="Delete Session"
             >
-              <i class="pi pi-times text-xs"></i>
+              <i class="pi pi-times text-sm font-bold"></i>
             </button>
           </div>
           
