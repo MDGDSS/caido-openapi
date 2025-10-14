@@ -1,5 +1,12 @@
 <script setup lang="ts">
 import Button from "primevue/button";
+
+// Extend window interface for our custom property
+declare global {
+  interface Window {
+    openapiUrlCheckInterval?: NodeJS.Timeout;
+  }
+}
 import InputText from "primevue/inputtext";
 import Textarea from "primevue/textarea";
 import Card from "primevue/card";
@@ -16,7 +23,57 @@ import { useSDK } from "@/plugins/sdk";
 
 const sdk = useSDK();
 
-// Reactive state
+// GitHub star button function
+const openGitHubInBrowser = () => {
+  try {
+    if (window.__CAIDO_DESKTOP__ && window.__CAIDO_DESKTOP__.openInBrowser) {
+      window.__CAIDO_DESKTOP__.openInBrowser('https://github.com/MDGDSS/caido-openapi');
+    } else {
+      // Fallback to regular window.open if Caido desktop API is not available
+      window.open('https://github.com/MDGDSS/caido-openapi', '_blank', 'noopener,noreferrer');
+    }
+  } catch (error) {
+    console.warn('Failed to open GitHub link:', error);
+    // Fallback to regular window.open
+    window.open('https://github.com/MDGDSS/caido-openapi', '_blank', 'noopener,noreferrer');
+  }
+};
+
+// Session management
+interface OpenAPISession {
+  id: string;
+  name: string;
+  schemaText: string;
+  baseUrl: string;
+  workers: number;
+  delayBetweenRequests: number;
+  timeout: number;
+  useRandomValues: boolean;
+  useParameterFromDefinition: boolean;
+  testResults: any[];
+  testCases: any[];
+  isSchemaLoaded: boolean;
+  pathVariableValues: Record<string, string[]>;
+  bodyVariableValues: Record<string, string[]>;
+  customHeaders: string;
+  variablesExpanded: boolean;
+  expandedResults: Set<string>;
+  expandedTestCases: Set<string>;
+  requestResponseTab: string;
+  testCasePathVariableValues: Record<string, Record<string, string>>;
+  testCaseQueryParameterValues: Record<string, Record<string, string>>;
+  testCaseBodyVariableValues: Record<string, Record<string, any>>;
+  createdAt: string;
+  lastModified: string;
+}
+
+// Session state
+const sessions = ref<OpenAPISession[]>([]);
+const currentSessionId = ref<string | null>(null);
+const sessionCounter = ref<Record<string, number>>({});
+const currentProjectId = ref<string>('default');
+
+// Reactive state (now session-specific)
 const schemaText = ref("");
 const baseUrl = ref("http://localhost:3000");
 const workers = ref(10);
@@ -60,6 +117,288 @@ const isQueryActive = ref(false);
 // Endpoint search functionality
 const endpointSearchQuery = ref("");
 const filteredTestCases = ref<any[]>([]);
+
+// Validate schema locally
+const validateSchema = async () => {
+  try {
+    if (!schemaText.value.trim()) {
+      validationResult.value = null;
+      return;
+    }
+    
+    const result = await sdk.backend.validateSchema(schemaText.value);
+    validationResult.value = result;
+  } catch (error) {
+    validationResult.value = {
+      valid: false,
+      errors: [`Validation error: ${error.message}`]
+    };
+  }
+};
+
+// Session management functions
+const createNewSession = (): OpenAPISession => {
+  const sessionId = `session-${Date.now()}`;
+  
+  // Initialize counter for this project if it doesn't exist
+  if (!sessionCounter.value[currentProjectId.value]) {
+    sessionCounter.value[currentProjectId.value] = 1;
+  }
+  
+  const sessionName = `Session ${sessionCounter.value[currentProjectId.value]}`;
+  sessionCounter.value[currentProjectId.value]++;
+  
+  const newSession: OpenAPISession = {
+    id: sessionId,
+    name: sessionName,
+    schemaText: "",
+    baseUrl: "http://localhost:3000",
+    workers: 10,
+    delayBetweenRequests: 0,
+    timeout: 30000,
+    useRandomValues: false,
+    useParameterFromDefinition: true,
+    testResults: [],
+    testCases: [],
+    isSchemaLoaded: false,
+    pathVariableValues: {},
+    bodyVariableValues: {},
+    customHeaders: "",
+    variablesExpanded: true,
+    expandedResults: new Set(),
+    expandedTestCases: new Set(),
+    requestResponseTab: 'request',
+    testCasePathVariableValues: {},
+    testCaseQueryParameterValues: {},
+    testCaseBodyVariableValues: {},
+    createdAt: new Date().toISOString(),
+    lastModified: new Date().toISOString()
+  };
+  
+  return newSession;
+};
+
+const saveCurrentSession = () => {
+  if (!currentSessionId.value) return;
+  
+  const currentSession = sessions.value.find(s => s.id === currentSessionId.value);
+  if (currentSession) {
+    
+    // Convert Sets to Arrays for storage
+    currentSession.schemaText = schemaText.value;
+    currentSession.baseUrl = baseUrl.value;
+    currentSession.workers = workers.value;
+    currentSession.delayBetweenRequests = delayBetweenRequests.value;
+    currentSession.timeout = timeout.value;
+    currentSession.useRandomValues = useRandomValues.value;
+    currentSession.useParameterFromDefinition = useParameterFromDefinition.value;
+    currentSession.testResults = [...testResults.value];
+    currentSession.testCases = [...testCases.value];
+    currentSession.isSchemaLoaded = isSchemaLoaded.value;
+    currentSession.pathVariableValues = { ...pathVariableValues.value };
+    currentSession.bodyVariableValues = { ...bodyVariableValues.value };
+    currentSession.customHeaders = customHeaders.value;
+    currentSession.variablesExpanded = variablesExpanded.value;
+    currentSession.expandedResults = new Set(expandedResults.value);
+    currentSession.expandedTestCases = new Set(expandedTestCases.value);
+    currentSession.requestResponseTab = requestResponseTab.value;
+    currentSession.testCasePathVariableValues = { ...testCasePathVariableValues.value };
+    currentSession.testCaseQueryParameterValues = { ...testCaseQueryParameterValues.value };
+    currentSession.testCaseBodyVariableValues = { ...testCaseBodyVariableValues.value };
+    currentSession.lastModified = new Date().toISOString();
+    
+    // Save to Caido project storage
+    saveSessionsToStorage();
+  }
+};
+
+const loadSession = async (sessionId: string) => {
+  const session = sessions.value.find(s => s.id === sessionId);
+  if (!session) return;
+  
+  
+  // Save current session before switching
+  await saveCurrentSession();
+  
+  // Load new session data
+  schemaText.value = session.schemaText || '';
+  baseUrl.value = session.baseUrl || '';
+  workers.value = session.workers || 10;
+  delayBetweenRequests.value = session.delayBetweenRequests || 100;
+  timeout.value = session.timeout || 30000;
+  useRandomValues.value = session.useRandomValues || false;
+  useParameterFromDefinition.value = session.useParameterFromDefinition || false;
+  testResults.value = [...(session.testResults || [])];
+  testCases.value = [...(session.testCases || [])];
+  isSchemaLoaded.value = session.isSchemaLoaded || false;
+  pathVariableValues.value = { ...(session.pathVariableValues || {}) };
+  bodyVariableValues.value = { ...(session.bodyVariableValues || {}) };
+  customHeaders.value = session.customHeaders || '';
+  variablesExpanded.value = session.variablesExpanded || false;
+  expandedResults.value = new Set(session.expandedResults || []);
+  expandedTestCases.value = new Set(session.expandedTestCases || []);
+  requestResponseTab.value = session.requestResponseTab || 'request';
+  testCasePathVariableValues.value = { ...(session.testCasePathVariableValues || {}) };
+  testCaseQueryParameterValues.value = { ...(session.testCaseQueryParameterValues || {}) };
+  testCaseBodyVariableValues.value = { ...(session.testCaseBodyVariableValues || {}) };
+  
+  currentSessionId.value = sessionId;
+  
+};
+
+const deleteSession = async (sessionId: string) => {
+  const sessionIndex = sessions.value.findIndex(s => s.id === sessionId);
+  if (sessionIndex === -1) return;
+  
+  // If deleting current session, switch to another one
+  if (currentSessionId.value === sessionId) {
+    if (sessions.value.length > 1) {
+      const nextSession = sessions.value[sessionIndex === 0 ? 1 : sessionIndex - 1];
+      await loadSession(nextSession.id);
+    } else {
+      // Create a new session if this was the last one
+      const newSession = createNewSession();
+      sessions.value = [newSession];
+      await loadSession(newSession.id);
+    }
+  }
+  
+  sessions.value.splice(sessionIndex, 1);
+  await saveSessionsToStorage();
+};
+
+const saveSessionsToStorage = async () => {
+  try {
+    // Check if environment has changed and update project ID if needed
+    const currentOpenapiValue = await sdk.env.getVar('openapi');
+    if (currentOpenapiValue !== currentProjectId.value) {
+      console.log('Environment changed, updating project ID from', currentProjectId.value, 'to', currentOpenapiValue);
+      currentProjectId.value = currentOpenapiValue;
+      
+      // Load sessions for the new environment
+      await loadSessionsFromStorage();
+      return; // Don't save old sessions to new environment
+    }
+    
+    const sessionsData = sessions.value.map(session => ({
+      ...session,
+      expandedResults: Array.from(session.expandedResults),
+      expandedTestCases: Array.from(session.expandedTestCases)
+    }));
+    
+    const storageKey = `openapi-sessions-${currentProjectId.value}`;
+    
+    
+    // Try Caido storage first, then always save to localStorage as backup
+    try {
+      await sdk.storage.set(storageKey, sessionsData);
+    } catch (storageError) {
+      console.warn('Caido storage failed:', storageError);
+    }
+    
+    // Always save to localStorage as backup
+    try {
+      localStorage.setItem(storageKey, JSON.stringify(sessionsData));
+    } catch (localStorageError) {
+      console.error('localStorage save failed:', localStorageError);
+    }
+  } catch (error) {
+    console.error('Failed to save sessions:', error);
+  }
+};
+
+const loadSessionsFromStorage = async () => {
+  try {
+    const storageKey = `openapi-sessions-${currentProjectId.value}`;
+    
+    
+    let sessionsData = null;
+    
+    // Try both Caido storage and localStorage, prefer the one with valid data
+    let caidoData = null;
+    let localData = null;
+    
+    // Try Caido storage
+    try {
+      caidoData = await sdk.storage.get(storageKey);
+      
+      // Security check: if the data is just the storage key or empty, treat as no data
+      if (caidoData === storageKey || caidoData === null || caidoData === undefined || caidoData === '') {
+        caidoData = null;
+      }
+    } catch (storageError) {
+      console.warn('Caido storage failed:', storageError);
+      caidoData = null;
+    }
+    
+    // Try localStorage
+    try {
+      const localDataString = localStorage.getItem(storageKey);
+      if (localDataString) {
+        localData = JSON.parse(localDataString);
+      } else {
+      }
+    } catch (parseError) {
+      console.error('Failed to parse localStorage data:', parseError);
+      localData = null;
+    }
+    
+    // Choose the best data source
+    if (caidoData && Array.isArray(caidoData) && caidoData.length > 0) {
+      sessionsData = caidoData;
+    } else if (localData && Array.isArray(localData) && localData.length > 0) {
+      sessionsData = localData;
+    } else {
+      sessionsData = null;
+    }
+    
+    // Also check if sessionsData is an object with sessions property
+    if (sessionsData && typeof sessionsData === 'object' && sessionsData.sessions) {
+      sessionsData = sessionsData.sessions;
+    }
+    
+    if (sessionsData && Array.isArray(sessionsData)) {
+      
+      sessions.value = sessionsData.map(session => ({
+        ...session,
+        expandedResults: new Set(session.expandedResults || []),
+        expandedTestCases: new Set(session.expandedTestCases || [])
+      }));
+      
+      // Initialize session counter for this project based on existing sessions
+      if (sessions.value.length > 0) {
+        const maxSessionNumber = Math.max(...sessions.value.map(session => {
+          const match = session.name.match(/Session (\d+)/);
+          return match ? parseInt(match[1]) : 0;
+        }));
+        sessionCounter.value[currentProjectId.value] = maxSessionNumber + 1;
+        
+        
+        // Load the first session
+        await loadSession(sessions.value[0].id);
+      } else {
+        // No sessions found, create a new one
+        sessionCounter.value[currentProjectId.value] = 1;
+        const newSession = createNewSession();
+        sessions.value = [newSession];
+        await loadSession(newSession.id);
+      }
+    } else {
+      // No sessions found, create a new one
+      sessionCounter.value[currentProjectId.value] = 1;
+      const newSession = createNewSession();
+      sessions.value = [newSession];
+      await loadSession(newSession.id);
+    }
+  } catch (error) {
+    console.error('Failed to load sessions:', error);
+    // Create a new session as fallback
+    const newSession = createNewSession();
+    sessions.value = [newSession];
+    await loadSession(newSession.id);
+  }
+};
+
 
 // Schema definition viewer state
 const parsedSchema = ref<any>(null);
@@ -431,6 +770,9 @@ const loadSchema = async () => {
       isSchemaLoaded.value = true;
       activeTab.value = 1; // Switch to test cases tab
       
+      // Auto-save session after loading schema
+      await saveCurrentSession();
+      
       // Initialize path variables
       const allPathVariables = new Set<string>();
       cases.forEach(testCase => {
@@ -544,19 +886,6 @@ const attachRequestContextMenu = (container: HTMLElement, testResult: any) => {
   }
 };
 
-const validateSchema = async () => {
-  if (!schemaText.value.trim()) {
-    validationResult.value = { valid: false, errors: ["Please enter an OpenAPI schema"] };
-    return;
-  }
-
-  try {
-    // Use local validation to avoid RPC payload size issues
-    validationResult.value = validateSchemaLocally(schemaText.value);
-  } catch (error) {
-    validationResult.value = { valid: false, errors: [error instanceof Error ? error.message : "Validation failed"] };
-  }
-};
 
 const toMinimalTestCase = (tc: any) => ({
   path: tc.path,
@@ -1173,12 +1502,12 @@ const formatRequestForCaido = (testResult: any): string => {
   
   // Add request body only when one was actually sent, or when method typically has a body
   let bodyToShow: any | undefined = undefined;
-  if (testResult && testResult.actualBody) {
-    bodyToShow = testResult.actualBody;
+    if (testResult && testResult.actualBody) {
+      bodyToShow = testResult.actualBody;
   } else if ((testCase.method === 'POST' || testCase.method === 'PUT' || testCase.method === 'PATCH') && testCase.bodyVariables && Object.keys(testCase.bodyVariables).length > 0) {
-    bodyToShow = testCase.bodyVariables;
-  }
-  
+      bodyToShow = testCase.bodyVariables;
+    }
+    
   if (bodyToShow !== undefined) {
     request += JSON.stringify(bodyToShow, null, 2);
   }
@@ -2110,8 +2439,15 @@ onMounted(() => {
 });
 
 // Persist results in localStorage to prevent loss when switching tabs
-const saveResultsToStorage = () => {
+const saveResultsToStorage = async () => {
   try {
+    // Check if environment has changed and update project ID if needed
+    const currentOpenapiValue = await sdk.env.getVar('openapi');
+    if (currentOpenapiValue !== currentProjectId.value) {
+      console.log('Environment changed, updating project ID from', currentProjectId.value, 'to', currentOpenapiValue);
+      currentProjectId.value = currentOpenapiValue;
+    }
+    
     const dataToSave = {
       allTestResults: allTestResults.value,
       testResults: testResults.value,
@@ -2141,14 +2477,115 @@ const loadResultsFromStorage = () => {
   }
 };
 
+
+
 // Save results whenever they change
 watch([allTestResults, testResults, filteredTestResults], () => {
   saveResultsToStorage();
 }, { deep: true });
 
-// Load results on mount
-onMounted(() => {
+// Sessions are now saved via auto-save every 5 minutes and on validation
+
+// Load results and sessions on mount
+onMounted(async () => {
+  // Use environment variable for project identification
+  const setupEnvironmentVariable = async () => {
+    try {
+      const openapiValue = await sdk.env.getVar('openapi');
+      
+      if (!openapiValue) {
+        const randomValue = Math.random().toString(36).substring(2, 15);
+        
+        const result = await sdk.backend.setEnvironmentVariable({
+          name: 'openapi',
+          value: randomValue,
+          secret: false,
+          global: true
+        });
+        
+        if (result.success) {
+          return randomValue;
+        } else {
+          throw new Error(result.error);
+        }
+      }
+      
+      return openapiValue;
+    } catch (error) {
+      console.error('Environment variable setup failed:', error);
+      throw error;
+    }
+  };
+  
+  // Get project ID from environment variable
+  currentProjectId.value = await setupEnvironmentVariable();
+  
+  // Load sessions from storage first
+  await loadSessionsFromStorage();
+  
+  // Then load results (this will be session-specific)
   loadResultsFromStorage();
+  
+  // Set up environment variable change detection
+  const checkEnvironmentChange = async () => {
+    try {
+      const currentOpenapiValue = await sdk.env.getVar('openapi');
+      
+      // If environment variable doesn't exist or is empty, create it
+      if (!currentOpenapiValue) {
+        const randomValue = Math.random().toString(36).substring(2, 15);
+        
+        const result = await sdk.backend.setEnvironmentVariable({
+          name: 'openapi',
+          value: randomValue,
+          secret: false,
+          global: true
+        });
+        
+        if (result.success) {
+          currentProjectId.value = randomValue;
+          await loadSessionsFromStorage();
+        }
+      } else if (currentOpenapiValue !== currentProjectId.value) {
+        // Environment variable exists but value changed
+        currentProjectId.value = currentOpenapiValue;
+        await loadSessionsFromStorage();
+      }
+    } catch (error) {
+      console.warn('Failed to check environment change:', error);
+    }
+  };
+  
+  // Check for environment changes every 3 seconds
+  const environmentCheckInterval = setInterval(checkEnvironmentChange, 3000);
+  
+  // Set up auto-save functionality
+  const autoSaveInterval = setInterval(() => {
+    saveCurrentSession();
+  }, 180000); // Auto-save every 3 minutes
+  
+  // Set up beforeunload event to save on page close
+  const handleBeforeUnload = () => {
+    saveCurrentSession();
+  };
+  window.addEventListener('beforeunload', handleBeforeUnload);
+  
+  // Set up visibility change to save when tab becomes hidden
+  const handleVisibilityChange = () => {
+    if (document.visibilityState === 'hidden') {
+      saveCurrentSession();
+    }
+  };
+  document.addEventListener('visibilitychange', handleVisibilityChange);
+  
+  // Cleanup on unmount
+  onUnmounted(() => {
+    clearInterval(autoSaveInterval);
+    clearInterval(environmentCheckInterval);
+    window.removeEventListener('beforeunload', handleBeforeUnload);
+    document.removeEventListener('visibilitychange', handleVisibilityChange);
+    saveCurrentSession(); // Final save before unmount
+  });
 });
 </script>
 
@@ -2156,21 +2593,60 @@ onMounted(() => {
   <div class="h-full flex flex-col relative overflow-hidden">
     <!-- Header -->
     <div class="flex items-center justify-between p-4 border-b border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800">
+      <div class="flex items-center gap-4">
       <div>
         <h1 class="text-2xl font-bold text-gray-800 dark:text-gray-200">OpenAPI Tester</h1>
         <p class="text-sm text-gray-600 dark:text-gray-400 mt-1">
           Test your OpenAPI schemas with real HTTP requests
         </p>
     </div>
+        
+        <!-- Session Management -->
+        <div class="flex items-center gap-1 bg-gray-100 dark:bg-gray-700 rounded-lg p-1">
+          <div 
+            v-for="session in sessions" 
+            :key="session.id"
+            :class="[
+              'flex items-center gap-2 px-3 py-1 rounded-md cursor-pointer transition-all duration-200',
+              currentSessionId === session.id 
+                ? 'bg-blue-600 text-white border border-blue-500 shadow-md' 
+                : 'bg-white dark:bg-gray-600 text-gray-700 dark:text-gray-300 hover:bg-blue-50 dark:hover:bg-gray-500 border border-gray-200 dark:border-gray-500'
+            ]"
+            @click="() => loadSession(session.id)"
+          >
+            <span class="text-sm font-medium">{{ session.name }}</span>
+            <button 
+              @click.stop="() => deleteSession(session.id)"
+              class="text-gray-400 hover:text-red-500 transition-colors ml-1"
+              title="Kill Session"
+            >
+              <i class="pi pi-times text-xs"></i>
+            </button>
+          </div>
+          
+          <!-- Add New Session Button -->
+          <button 
+            @click="() => { const newSession = createNewSession(); sessions.push(newSession); loadSession(newSession.id); }"
+            class="flex items-center gap-1 px-2 py-1 rounded-md bg-blue-500 hover:bg-blue-600 text-white border border-blue-500 hover:border-blue-600 transition-colors text-sm"
+            title="Create New Session"
+          >
+            <i class="pi pi-plus text-sm"></i>
+            <span>Add</span>
+          </button>
+        </div>
+      </div>
+      
+      <!-- GitHub Star Button -->
       <div class="flex items-center gap-2">
-        <Button 
-          v-if="isSchemaLoaded && (getUniquePathVariables().length > 0 || Object.keys(bodyVariableValues).length > 0)"
-          :label="sidebarOpen ? 'Hide Variables' : 'Variables'"
-          @click="toggleSidebar"
-          severity="secondary"
-          size="small"
-          :icon="sidebarOpen ? 'pi pi-chevron-left' : 'pi pi-chevron-right'"
-        />
+        <button 
+          @click="openGitHubInBrowser"
+          class="inline-flex items-center gap-2 px-3 py-2 text-sm font-medium text-gray-700 dark:text-gray-300 bg-gray-100 dark:bg-gray-700 hover:bg-gray-200 dark:hover:bg-gray-600 rounded-md border border-gray-200 dark:border-gray-600 transition-colors duration-200 cursor-pointer"
+        >
+          <svg class="w-4 h-4 text-yellow-500" fill="currentColor" viewBox="0 0 24 24">
+            <path d="M12 17.27 18.18 21l-1.64-7.03L22 9.24l-7.19-.61L12 2 9.19 8.63 2 9.24l5.46 4.73L5.82 21z"/>
+          </svg>
+          Star on GitHub
+        </button>
   </div>
     </div>
 
@@ -2397,15 +2873,15 @@ onMounted(() => {
                                                   <div class="grid grid-cols-5 gap-4 items-center">
                                                     <!-- Method -->
                                                     <div>
-                                                      <span class="px-2 py-1 rounded text-xs font-medium" 
-                                                            :class="{
+                           <span class="px-2 py-1 rounded text-xs font-medium" 
+                                 :class="{
                                                               'bg-blue-100 text-blue-800': testCase.method === 'GET',
                                                               'bg-green-100 text-green-800': testCase.method === 'POST',
                                                               'bg-yellow-100 text-yellow-800': testCase.method === 'PUT',
                                                               'bg-red-100 text-red-800': testCase.method === 'DELETE'
                                                             }">
                                                         {{ testCase.method }}
-                                                      </span>
+                           </span>
                                                     </div>
                                                     
                                                     <!-- Path -->
@@ -2418,12 +2894,12 @@ onMounted(() => {
                                                       <div v-if="getTestStatus(testCase)" class="flex items-center gap-2">
                                                         <span :class="getStatusClass(getTestStatus(testCase)!.success)">
                                                           {{ getStatusIcon(getTestStatus(testCase)!.success) }}
-                                                        </span>
+                             </span>
                                                         <span :class="getStatusClass(getTestStatus(testCase)!.success)">
                                                           {{ getTestStatus(testCase)!.status }}
-                                                        </span>
-                                                      </div>
-                                                      <div v-else class="text-gray-400 text-sm">Not tested</div>
+                             </span>
+                           </div>
+                           <div v-else class="text-gray-400 text-sm">Not tested</div>
                                                     </div>
                                                     
                                                     <!-- Actions -->
@@ -2436,9 +2912,9 @@ onMounted(() => {
                                                         text
                                                         :title="isTestCaseExpanded(testCase) ? 'Collapse' : 'Expand'"
                                                       />
-                                                      <Button 
-                                                        label="Test" 
-                                                        size="small"
+                           <Button 
+                             label="Test" 
+                             size="small"
                                                         @click="runSingleTest(testCase)"
                                                         :loading="isTestRunning(testCase)"
                                                         :disabled="isTestRunning(testCase) || isLoading"
@@ -3094,10 +3570,10 @@ onMounted(() => {
                   <template #title>
                     <div class="flex items-center justify-between">
                       <span>
-                        {{ isQueryActive ? 'Filtered Test Results' : 'Test Results' }}
-                        <span v-if="isQueryActive" class="text-sm text-gray-500 ml-2">
-                          ({{ filteredTestResults.length }} of {{ allTestResults.length }})
-                        </span>
+                    {{ isQueryActive ? 'Filtered Test Results' : 'Test Results' }}
+                    <span v-if="isQueryActive" class="text-sm text-gray-500 ml-2">
+                      ({{ filteredTestResults.length }} of {{ allTestResults.length }})
+                    </span>
                       </span>
                       <Button 
                         label="Clear All Results" 
@@ -3280,7 +3756,7 @@ onMounted(() => {
                 
                 <div class="space-y-2">
                   <div v-for="(value, index) in getBodyVariableValue(key)" :key="index" class="flex items-center gap-2">
-                    <InputText 
+                  <InputText 
                       v-model="bodyVariableValues[key][index]"
                       :placeholder="`Value ${index + 1} for ${key}`"
                       class="flex-1"

@@ -1,6 +1,7 @@
 import { Classic } from "@caido/primevue";
 import PrimeVue from "primevue/config";
 import { createApp } from "vue";
+import { type Caido } from "@caido/sdk-frontend";
 
 import { SDKPlugin } from "./plugins/sdk";
 import "./styles/index.css";
@@ -8,7 +9,7 @@ import type { FrontendSDK } from "./types";
 import App from "./views/App.vue";
 
 // This is the entry point for the frontend plugin
-export const init = (sdk: FrontendSDK) => {
+export const init = (sdk: Caido<FrontendSDK['backend']>) => {
   const app = createApp(App);
 
   // Load the PrimeVue component library

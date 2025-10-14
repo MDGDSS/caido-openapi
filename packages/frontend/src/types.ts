@@ -8,6 +8,9 @@ export interface FrontendSDK {
   sidebar: {
     registerItem: (name: string, path: string) => void;
   };
+  projects: {
+    onCurrentProjectChange: (callback: (event: { projectId: string | undefined }) => void) => { stop: () => void };
+  };
   backend: {
     parseOpenAPISchema: (schemaText: string) => Promise<any>;
     generateTestCases: (schema: any) => Promise<any[]>;
@@ -19,6 +22,7 @@ export interface FrontendSDK {
     getSchemaInfo: (schemaText: string) => Promise<{ title: string; version: string; description?: string; pathCount: number; methodCount: number }>;
     testHttpRequest: (url: string) => Promise<{ success: boolean; status: number; response: string }>;
     openTestResultInCaido: (testResult: any, baseUrl: string) => Promise<void>;
+    setEnvironmentVariable: (options: { name: string; value: string; secret?: boolean; global?: boolean }) => Promise<{ success: boolean; value?: string; error?: string }>;
     // Session management
     createSession: (name: string, schema: any, configuration: any) => Promise<any>;
     getSession: (id: string) => Promise<any>;

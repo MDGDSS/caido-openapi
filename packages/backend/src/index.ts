@@ -1113,6 +1113,7 @@ async function sendResultToReplay(
   }
 }
 
+
 export type API = DefineAPI<{
   parseOpenAPISchema: typeof parseOpenAPISchema;
   generateTestCases: typeof generateTestCases;
@@ -1125,6 +1126,7 @@ export type API = DefineAPI<{
   testHttpRequest: typeof testHttpRequest;
   openTestResultInCaido: typeof openTestResultInCaido;
   sendResultToReplay: typeof sendResultToReplay;
+  setEnvironmentVariable: typeof setEnvironmentVariable;
 }>;
 
 export function init(sdk: SDK<API>) {
@@ -1139,4 +1141,34 @@ export function init(sdk: SDK<API>) {
   sdk.api.register("testHttpRequest", testHttpRequest);
   sdk.api.register("openTestResultInCaido", openTestResultInCaido);
   sdk.api.register("sendResultToReplay", sendResultToReplay);
+  sdk.api.register("setEnvironmentVariable", setEnvironmentVariable);
 }
+
+// Set environment variable using backend SDK
+async function setEnvironmentVariable(sdk: SDK, options: { name: string; value: string; secret?: boolean; global?: boolean }) {
+  try {
+    // Validate required parameters
+    if (!options || typeof options !== 'object') {
+      throw new Error('Options parameter is required and must be an object');
+    }
+    if (!options.name || typeof options.name !== 'string') {
+      throw new Error('Environment variable name is required and must be a string');
+    }
+    if (!options.value || typeof options.value !== 'string') {
+      throw new Error('Environment variable value is required and must be a string');
+    }
+    
+    await sdk.env.setVar({
+      name: options.name,
+      value: options.value,
+      secret: options.secret || false,
+      global: options.global || false
+    });
+    
+    return { success: true, value: options.value };
+  } catch (error) {
+    console.error('Failed to set environment variable:', error);
+    return { success: false, error: error.message };
+  }
+}
+
