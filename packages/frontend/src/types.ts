@@ -23,6 +23,13 @@ export interface FrontendSDK {
     testHttpRequest: (url: string) => Promise<{ success: boolean; status: number; response: string }>;
     openTestResultInCaido: (testResult: any, baseUrl: string) => Promise<void>;
     setEnvironmentVariable: (options: { name: string; value: string; secret?: boolean; global?: boolean }) => Promise<{ success: boolean; value?: string; error?: string }>;
+    // Database storage functions
+    saveSessionsToDb: (projectId: string, sessions: any[]) => Promise<{ kind: "Error"; error: string } | { kind: "Ok"; value: undefined }>;
+    loadSessionsFromDb: (projectId: string) => Promise<{ kind: "Error"; error: string } | { kind: "Ok"; value: any[] }>;
+    saveTestResultsToDb: (testResults: any) => Promise<{ kind: "Error"; error: string } | { kind: "Ok"; value: undefined }>;
+    loadTestResultsFromDb: () => Promise<{ kind: "Error"; error: string } | { kind: "Ok"; value: any }>;
+    logDatabaseContents: () => Promise<{ kind: "Error"; error: string } | { kind: "Ok"; value: undefined }>;
+    migrateFromLocalStorage: (localStorageData: { sessions: Record<string, any[]>, testResults: any }) => Promise<{ kind: "Error"; error: string } | { kind: "Ok"; value: { sessionsMigrated: number; testResultsMigrated: boolean } }>;
     // Session management
     createSession: (name: string, schema: any, configuration: any) => Promise<any>;
     getSession: (id: string) => Promise<any>;

@@ -10,9 +10,6 @@ declare global {
 import InputText from "primevue/inputtext";
 import Textarea from "primevue/textarea";
 import Card from "primevue/card";
-import DataTable from "primevue/datatable";
-import Column from "primevue/column";
-import ProgressSpinner from "primevue/progressspinner";
 import Message from "primevue/message";
 import TabView from "primevue/tabview";
 import TabPanel from "primevue/tabpanel";
@@ -36,6 +33,115 @@ const openGitHubInBrowser = () => {
     console.warn('Failed to open GitHub link:', error);
     // Fallback to regular window.open
     window.open('https://github.com/MDGDSS/caido-openapi', '_blank', 'noopener,noreferrer');
+  }
+};
+
+// Check if localStorage has data to migrate
+const hasLocalStorageData = computed(() => {
+  try {
+    return localStorage.getItem('openapi-testing-results') !== null;
+  } catch {
+    return false;
+  }
+});
+
+// Get project key - use project ID if available, otherwise use openapi env var, otherwise 'default'
+const getProjectKey = async (projectId?: string): Promise<string> => {
+  // First, try to use the provided project ID
+  if (projectId) {
+    console.log(`Using project ID as key: ${projectId}`);
+    return projectId;
+  }
+  
+  // Second, try to get project ID from current project
+  try {
+    // Try to get current project ID from the SDK if available
+    // Note: This might not be directly available, so we'll rely on the project change event
+  } catch (error) {
+    console.warn('Failed to get project ID:', error);
+  }
+  
+  // Third, try openapi environment variable
+  try {
+    const openapiValue = await sdk.env.getVar('openapi');
+    if (openapiValue) {
+      console.log(`Found 'openapi' env var: ${openapiValue}`);
+      return openapiValue;
+    }
+  } catch (error) {
+    console.warn('Failed to get openapi env var:', error);
+  }
+  
+  // Fallback to 'default' if nothing found
+  return 'default';
+};
+
+// Show database contents
+const showDatabaseContents = async () => {
+  try {
+    const result = await sdk.backend.logDatabaseContents();
+
+  } catch (error) {
+    console.error('Error showing database contents:', error);
+    alert(`Error: ${error instanceof Error ? error.message : String(error)}`);
+  }
+};
+
+// Migration function
+const migrateLocalStorageToDb = async () => {
+  try {
+    const sessionsData: Record<string, any[]> = {};
+    let testResultsData: any = null;
+    
+    // Collect all session data from localStorage
+    try {
+      for (let i = 0; i < localStorage.length; i++) {
+        const key = localStorage.key(i);
+        if (key && key.startsWith('openapi-sessions-')) {
+          const value = localStorage.getItem(key);
+          if (value) {
+            try {
+              sessionsData[key] = JSON.parse(value);
+            } catch (parseError) {
+              console.error(`Failed to parse localStorage key ${key}:`, parseError);
+            }
+          }
+        }
+      }
+    } catch (error) {
+      console.error('Error reading sessions from localStorage:', error);
+    }
+    
+    // Get test results from localStorage
+    try {
+      const testResultsStr = localStorage.getItem('openapi-testing-results');
+      if (testResultsStr) {
+        testResultsData = JSON.parse(testResultsStr);
+      }
+    } catch (error) {
+      console.error('Error reading test results from localStorage:', error);
+    }
+    
+    // Migrate to database (no environment variable migration needed)
+    const result = await sdk.backend.migrateFromLocalStorage({
+      sessions: sessionsData,
+      testResults: testResultsData
+    });
+    
+    if (result.kind === "Ok") {
+      console.log(`Migration successful: ${result.value.sessionsMigrated} sessions, test results: ${result.value.testResultsMigrated ? 'yes' : 'no'}`);
+      // Reload sessions from database after migration
+      await loadSessionsFromStorage();
+      // Reload test results from database after migration
+      await loadResultsFromStorage();
+      alert(`Migration complete!\n${result.value.sessionsMigrated} sessions migrated\nTest results: ${result.value.testResultsMigrated ? 'Migrated' : 'Not found'}`);
+    } else {
+      console.error('Migration failed:', result.error);
+      alert(`Migration failed: ${result.error}`);
+    }
+  } catch (error) {
+    console.error('Migration error:', error);
+    alert(`Migration error: ${error instanceof Error ? error.message : String(error)}`);
   }
 };
 
@@ -77,7 +183,7 @@ const editingSessionName = ref<string>('');
 
 // Reactive state (now session-specific)
 const schemaText = ref("");
-const baseUrl = ref("http://localhost:3000");
+const baseUrl = ref("https://google.com");
 const workers = ref(10);
 const delayBetweenRequests = ref(0);
 const timeout = ref(30000);
@@ -119,6 +225,13 @@ const isQueryActive = ref(false);
 // Endpoint search functionality
 const endpointSearchQuery = ref("");
 const filteredTestCases = ref<any[]>([]);
+// Schema definition viewer state
+const parsedSchema = ref<any>(null);
+const selectedPath = ref("");
+const selectedMethod = ref("");
+const expandedPaths = ref<Set<string>>(new Set());
+const expandedComponents = ref<Set<string>>(new Set());
+
 
 // Validate schema locally
 const validateSchema = async () => {
@@ -180,7 +293,7 @@ const createNewSession = (): OpenAPISession => {
   return newSession;
 };
 
-const saveCurrentSession = () => {
+const saveCurrentSession = async () => {
   if (!currentSessionId.value) return;
   
   const currentSession = sessions.value.find(s => s.id === currentSessionId.value);
@@ -210,7 +323,7 @@ const saveCurrentSession = () => {
     currentSession.lastModified = new Date().toISOString();
     
     // Save to Caido project storage
-    saveSessionsToStorage();
+    await saveSessionsToStorage();
   }
 };
 
@@ -218,9 +331,10 @@ const loadSession = async (sessionId: string) => {
   const session = sessions.value.find(s => s.id === sessionId);
   if (!session) return;
   
-  
-  // Save current session before switching
-  await saveCurrentSession();
+  // Save current session before switching (only if switching to a different session)
+  if (currentSessionId.value && currentSessionId.value !== sessionId) {
+    await saveCurrentSession();
+  }
   
   // Load new session data
   schemaText.value = session.schemaText || '';
@@ -283,8 +397,14 @@ const deleteSession = async (sessionId: string) => {
   await saveSessionsToStorage();
 };
 
-// Rename session functions
-const renameInputRef = ref<HTMLInputElement | null>(null);
+const handleAddSession = async () => {
+  if (currentSessionId.value) await saveCurrentSession();
+
+  const newSession = createNewSession();
+  sessions.value.push(newSession);
+  await loadSession(newSession.id);
+  await saveSessionsToStorage();
+};
 
 const startRenameSession = (sessionId: string) => {
   const session = sessions.value.find(s => s.id === sessionId);
@@ -329,15 +449,23 @@ const handleRenameKeydown = async (event: KeyboardEvent, sessionId: string) => {
 
 const saveSessionsToStorage = async () => {
   try {
-    // Check if environment has changed and update project ID if needed
-    const currentOpenapiValue = await sdk.env.getVar('openapi');
-    if (currentOpenapiValue !== currentProjectId.value) {
-      console.log('Environment changed, updating project ID from', currentProjectId.value, 'to', currentOpenapiValue);
-      currentProjectId.value = currentOpenapiValue;
-      
-      // Load sessions for the new environment
-      await loadSessionsFromStorage();
-      return; // Don't save old sessions to new environment
+    // ALWAYS check openapi env var first - this is the key we use in the database
+    let projectKey: string;
+    try {
+      const openapiValue = await sdk.env.getVar('openapi');
+      if (openapiValue) {
+        console.log(`Found 'openapi' env var for saving: ${openapiValue}`);
+        projectKey = openapiValue;
+        currentProjectId.value = projectKey; // Update currentProjectId to match
+      } else {
+        // If no env var, always use 'default' - DO NOT use currentProjectId to avoid random keys
+        projectKey = 'default';
+        console.log(`No 'openapi' env var found, using 'default' key`);
+      }
+    } catch (error) {
+      console.warn('Failed to get openapi env var:', error);
+      // Always fall back to 'default', never use currentProjectId
+      projectKey = 'default';
     }
     
     const sessionsData = sessions.value.map(session => ({
@@ -346,9 +474,25 @@ const saveSessionsToStorage = async () => {
       expandedTestCases: Array.from(session.expandedTestCases)
     }));
     
-    const storageKey = `openapi-sessions-${currentProjectId.value}`;
+    const storageKey = `openapi-sessions-${projectKey}`;
+    console.log(`Saving sessions for project key: ${projectKey}`);
     
+    // Save to Caido database
+    try {
+      const result = await sdk.backend.saveSessionsToDb(projectKey, sessionsData);
+      if (result.kind === "Error") {
+        console.error('Failed to save sessions to database:', result.error);
+      } else {
+        // Log database contents after save
+        await sdk.backend.logDatabaseContents();
+      }
+    } catch (dbError) {
+      console.error('Database save failed:', dbError);
+    }
     
+    // Keep localStorage code for later migration (commented out but preserved)
+    // TODO: Remove localStorage code after migration button is implemented
+    /*
     // Try Caido storage first, then always save to localStorage as backup
     try {
       await sdk.storage.set(storageKey, sessionsData);
@@ -362,6 +506,7 @@ const saveSessionsToStorage = async () => {
     } catch (localStorageError) {
       console.error('localStorage save failed:', localStorageError);
     }
+    */
   } catch (error) {
     console.error('Failed to save sessions:', error);
   }
@@ -369,11 +514,45 @@ const saveSessionsToStorage = async () => {
 
 const loadSessionsFromStorage = async () => {
   try {
-    const storageKey = `openapi-sessions-${currentProjectId.value}`;
+    // ALWAYS check openapi env var first - this is the key we use in the database
+    let projectKey: string;
+    try {
+      const openapiValue = await sdk.env.getVar('openapi');
+      if (openapiValue) {
+        console.log(`Found 'openapi' env var for loading: ${openapiValue}`);
+        projectKey = openapiValue;
+        currentProjectId.value = projectKey; // Update currentProjectId to match
+      } else {
+        // If no env var, always use 'default' - DO NOT use currentProjectId to avoid random keys
+        projectKey = 'default';
+        console.log(`No 'openapi' env var found, using 'default' key`);
+      }
+    } catch (error) {
+      console.warn('Failed to get openapi env var:', error);
+      // Always fall back to 'default', never use currentProjectId
+      projectKey = 'default';
+    }
     
+    const storageKey = `openapi-sessions-${projectKey}`;
+    console.log(`Loading sessions for project key: ${projectKey}`);
     
     let sessionsData = null;
     
+    // Try to load from Caido database
+    try {
+      const result = await sdk.backend.loadSessionsFromDb(projectKey);
+      if (result.kind === "Ok") {
+        sessionsData = result.value;
+      } else {
+        console.warn('Failed to load sessions from database:', result.error);
+      }
+    } catch (dbError) {
+      console.error('Database load failed:', dbError);
+    }
+    
+    // Keep localStorage code for later migration (commented out but preserved)
+    // TODO: Remove localStorage code after migration button is implemented
+    /*
     // Try both Caido storage and localStorage, prefer the one with valid data
     let caidoData = null;
     let localData = null;
@@ -396,7 +575,6 @@ const loadSessionsFromStorage = async () => {
       const localDataString = localStorage.getItem(storageKey);
       if (localDataString) {
         localData = JSON.parse(localDataString);
-      } else {
       }
     } catch (parseError) {
       console.error('Failed to parse localStorage data:', parseError);
@@ -411,6 +589,7 @@ const loadSessionsFromStorage = async () => {
     } else {
       sessionsData = null;
     }
+    */
     
     // Also check if sessionsData is an object with sessions property
     if (sessionsData && typeof sessionsData === 'object' && sessionsData.sessions) {
@@ -459,74 +638,6 @@ const loadSessionsFromStorage = async () => {
   }
 };
 
-
-// Schema definition viewer state
-const parsedSchema = ref<any>(null);
-const selectedPath = ref("");
-const selectedMethod = ref("");
-const expandedPaths = ref<Set<string>>(new Set());
-const expandedComponents = ref<Set<string>>(new Set());
-
-// Sample OpenAPI schema for testing
-const sampleSchema = `{
-  "openapi": "3.0.0",
-  "info": {
-    "title": "Sample API",
-    "version": "1.0.0",
-    "description": "A sample API for testing"
-  },
-  "paths": {
-    "/users": {
-      "get": {
-        "summary": "Get all users",
-        "responses": {
-          "200": {
-            "description": "Successful response"
-          }
-        }
-      },
-      "post": {
-        "summary": "Create a new user",
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "type": "object",
-                "properties": {
-                  "name": { "type": "string" },
-                  "email": { "type": "string" }
-                }
-              }
-            }
-          }
-        },
-        "responses": {
-          "201": {
-            "description": "User created successfully"
-          }
-        }
-      }
-    },
-    "/users/{id}": {
-      "get": {
-        "summary": "Get user by ID",
-        "parameters": [
-          {
-            "name": "id",
-            "in": "path",
-            "required": true,
-            "schema": { "type": "string" }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Successful response"
-          }
-        }
-      }
-    }
-  }
-}`;
 
 // Computed properties
 const hasResults = computed(() => {
@@ -761,19 +872,6 @@ const validateSchemaLocally = (schemaText: string): { valid: boolean; errors: st
       errors.push("Missing 'openapi' or 'swagger' version field");
     }
     
-    /**
-    if (!schema.info) {
-      errors.push("Missing 'info' section");
-    } else {
-      if (!schema.info.title) errors.push("Missing 'info.title'");
-      if (!schema.info.version) errors.push("Missing 'info.version'");
-    } 
-    
-    if (!schema.paths || Object.keys(schema.paths).length === 0) {
-      errors.push("Missing or empty 'paths' section");
-    }
-    **/
-    
     // Additional validation
     if (schema.paths) {
       for (const [path, methods] of Object.entries(schema.paths)) {
@@ -802,11 +900,7 @@ const validateSchemaLocally = (schemaText: string): { valid: boolean; errors: st
   }
 };
 
-// Methods
-const loadSampleSchema = () => {
-  schemaText.value = sampleSchema;
-  validateSchema();
-};
+
 
 const loadSchema = async () => {
   if (!schemaText.value.trim()) {
@@ -1046,6 +1140,8 @@ const runAllTests = async () => {
   } finally {
     isLoading.value = false;
     resetStopFlag(); // Reset stop flag when tests complete (whether stopped or finished)
+    // Save session after tests complete
+    await saveCurrentSession();
   }
 };
 
@@ -1124,6 +1220,8 @@ const runSingleTest = async (testCase: any) => {
     // Mark test as not running
     runningTests.value.delete(testCase.name);
     resetStopFlag(); // Reset stop flag when single test completes
+    // Save session after test completes
+    await saveCurrentSession();
   }
 };
 
@@ -1198,10 +1296,7 @@ const updateTestCaseResult = (testCase: any, result: any, combination?: Record<s
     if (!testCases.value[index].results) {
       testCases.value[index].results = [];
     }
-    
-
-    
-    // Add the result with combination info
+ 
     const resultWithCombination = {
       ...result,
       combination: combination || {},
@@ -1449,15 +1544,7 @@ const setupGlobalRequestContextMenu = () => {
     menu.setAttribute('data-result-id', rid);
   }, true);
 
-  // Create replay helper: call backend API to ensure collection and send
-  async function sendResultToReplay(testResult: any) {
-    try {
-      if (!testResult) return;
-      const base = baseUrl.value?.trim();
-      if (!base) return;
-      await sdk.backend.sendResultToReplay(testResult, base);
-    } catch (_) {}
-  }
+
 
   menu.addEventListener('click', async (e) => {
     const target = e.target as HTMLElement;
@@ -1603,91 +1690,7 @@ const formatResponseForCaido = (testResult: any): string => {
   return responseText;
 };
 
-const formatResponseBody = (response: any) => {
-  try {
-    if (typeof response === 'string') {
-      // Check if it's XML
-      if (response.trim().startsWith('<?xml') || response.trim().startsWith('<')) {
-        // Format XML with indentation
-        return formatXML(response);
-      } else {
-        return response;
-      }
-    } else if (response && typeof response === 'object') {
-      // Return JSON as formatted string
-      return JSON.stringify(response, null, 2);
-    } else {
-      return String(response);
-    }
-  } catch (error) {
-    return `Error formatting response: ${error}`;
-  }
-};
 
-const formatXML = (xmlString: string) => {
-  // Format XML with proper indentation
-  let formatted = '';
-  let indent = 0;
-  const indentSize = 2;
-  
-  // Split by tags but preserve them
-  const parts = xmlString.split(/(<\/?[^>]+>)/);
-  
-  for (const part of parts) {
-    const trimmed = part.trim();
-    if (!trimmed) continue;
-    
-    if (trimmed.startsWith('<?xml')) {
-      // XML declaration
-      formatted += ' '.repeat(indent) + trimmed + '\n';
-    } else if (trimmed.startsWith('</')) {
-      // Closing tag - reduce indent first
-      indent = Math.max(0, indent - indentSize);
-      formatted += ' '.repeat(indent) + trimmed + '\n';
-    } else if (trimmed.startsWith('<') && !trimmed.endsWith('/>')) {
-      // Opening tag
-      formatted += ' '.repeat(indent) + trimmed + '\n';
-      indent += indentSize;
-    } else if (trimmed.endsWith('/>')) {
-      // Self-closing tag
-      formatted += ' '.repeat(indent) + trimmed + '\n';
-    } else {
-      // Text content
-      if (trimmed) {
-        formatted += ' '.repeat(indent) + trimmed + '\n';
-      }
-    }
-  }
-  
-  return formatted.trim();
-};
-
-const isJSONResponse = (response: any) => {
-  return response && typeof response === 'object' && !Array.isArray(response);
-};
-
-const formatResponseBodyWithHighlighting = (response: any) => {
-  try {
-    if (typeof response === 'string') {
-      return response;
-    } else if (response && typeof response === 'object') {
-      // For JSON, add syntax highlighting
-      const jsonString = JSON.stringify(response, null, 2);
-      return jsonString
-        .replace(/&/g, '&amp;')
-        .replace(/</g, '&lt;')
-        .replace(/>/g, '&gt;')
-        .replace(/"([^"]+)":/g, '<span class="text-yellow-400">"$1"</span>:')
-        .replace(/: "([^"]*)"/g, ': <span class="text-blue-300">"$1"</span>')
-        .replace(/: (\d+)/g, ': <span class="text-green-400">$1</span>')
-        .replace(/: (true|false|null)/g, ': <span class="text-purple-400">$1</span>');
-    } else {
-      return String(response);
-    }
-  } catch (error) {
-    return `Error formatting response: ${error}`;
-  }
-};
 
 const getTestStatus = (testCase: any) => {
   if (!testCase.result) return null;
@@ -1791,9 +1794,6 @@ const isTestRunning = (testCase: any) => {
   return runningTests.value.has(testCase.name);
 };
 
-const toggleSidebar = () => {
-  sidebarOpen.value = !sidebarOpen.value;
-};
 
 const getUniquePathVariables = () => {
   const variables = new Set<string>();
@@ -1807,9 +1807,6 @@ const getUniquePathVariables = () => {
   return Array.from(variables).sort((a, b) => a.localeCompare(b));
 };
 
-const toggleVariables = () => {
-  variablesExpanded.value = !variablesExpanded.value;
-};
 
 const toggleResultExpansion = (resultId: string) => {
   if (expandedResults.value.has(resultId)) {
@@ -2092,7 +2089,7 @@ const runHttpqlQuery = async () => {
   } finally {
     isHttpqlRunning.value = false;
   }
-};
+}; 
 
 const filterTestResultsByQuery = async () => {
   const query = httpqlQuery.value.toLowerCase();
@@ -2257,86 +2254,6 @@ const formatSchemaType = (schema: any) => {
   return 'object';
 };
 
-const getSchemaDescription = (schema: any) => {
-  if (schema.description) return schema.description;
-  if (schema.summary) return schema.summary;
-  return '';
-};
-
-// Find possible object definitions that might match a generic parameter
-const findPossibleObjectDefinitions = (schema: any, context?: any): any[] => {
-  const definitions = parsedSchema.value?.definitions || {};
-  const schemas = parsedSchema.value?.components?.schemas || {};
-  
-  // Look for definitions that have properties (not just additionalProperties)
-  const candidates: any[] = [];
-  
-  // First, try to find definitions that might be referenced by the schema
-  if (schema && schema.$ref) {
-    const refName = schema.$ref.split('/').pop();
-    const refSchema = definitions[refName] || schemas[refName];
-    if (refSchema && refSchema.properties && Object.keys(refSchema.properties).length > 0) {
-      candidates.push(refSchema);
-    }
-  }
-  
-  // If context is provided, try to find definitions that match the context
-  if (context && context.path) {
-    const pathKeywords = context.path.toLowerCase().split(/[\/\-_]/).filter(k => k.length > 2);
-    const nameKeywords = context.name ? context.name.toLowerCase().split(/[\s\-_]/).filter(k => k.length > 2) : [];
-    const allKeywords = [...pathKeywords, ...nameKeywords];
-    
-    // Check definitions (Swagger 2.0)
-    for (const [name, def] of Object.entries(definitions)) {
-      if (def && typeof def === 'object' && def.properties && Object.keys(def.properties).length > 0) {
-        // Check if the definition name contains any keywords from the context
-        const nameLower = name.toLowerCase();
-        const hasMatchingKeyword = allKeywords.some(keyword => nameLower.includes(keyword));
-        
-        if (hasMatchingKeyword) {
-          candidates.push(def);
-        }
-      }
-    }
-    
-    // Check schemas (OpenAPI 3.x)
-    for (const [name, schema] of Object.entries(schemas)) {
-      if (schema && typeof schema === 'object' && schema.properties && Object.keys(schema.properties).length > 0) {
-        // Check if the schema name contains any keywords from the context
-        const nameLower = name.toLowerCase();
-        const hasMatchingKeyword = allKeywords.some(keyword => nameLower.includes(keyword));
-        
-        if (hasMatchingKeyword) {
-          candidates.push(schema);
-        }
-      }
-    }
-  }
-  
-  // If no contextual matches found, fall back to all definitions but prioritize by relevance
-  if (candidates.length === 0) {
-    for (const [name, def] of Object.entries(definitions)) {
-      if (def && typeof def === 'object' && def.properties && Object.keys(def.properties).length > 0) {
-        candidates.push(def);
-      }
-    }
-    
-    for (const [name, schema] of Object.entries(schemas)) {
-      if (schema && typeof schema === 'object' && schema.properties && Object.keys(schema.properties).length > 0) {
-        candidates.push(schema);
-      }
-    }
-  }
-  
-  // Sort by number of properties (prefer more detailed objects)
-  candidates.sort((a, b) => {
-    const aProps = Object.keys(a.properties || {}).length;
-    const bProps = Object.keys(b.properties || {}).length;
-    return bProps - aProps;
-  });
-  
-  return candidates;
-};
 
 
 
@@ -2422,29 +2339,6 @@ const setupKeyboardShortcuts = () => {
   };
 };
 
-// Send current expanded result to Repeater
-const sendToRepeater = () => {
-  const expandedId = Array.from(expandedResults.value)[0];
-  if (!expandedId) {
-    return;
-  }
-  
-  let testResult = allTestResults.value.find(result => getResultId(result) === expandedId);
-  if (!testResult) {
-    testResult = testResults.value.find(result => getResultId(result) === expandedId);
-  }
-  if (!testResult) {
-    testResult = filteredTestResults.value.find(result => getResultId(result) === expandedId);
-  }
-  
-  if (testResult) {
-    try {
-      sdk.shortcuts.sendToRepeater();
-    } catch (error) {
-      // Silent fail
-    }
-  }
-};
 
 // Send current expanded result to Replay
 const sendToReplay = () => {
@@ -2498,30 +2392,60 @@ onMounted(() => {
   });
 });
 
-// Persist results in localStorage to prevent loss when switching tabs
+// Persist results in database to prevent loss when switching tabs
 const saveResultsToStorage = async () => {
   try {
-    // Check if environment has changed and update project ID if needed
-    const currentOpenapiValue = await sdk.env.getVar('openapi');
-    if (currentOpenapiValue !== currentProjectId.value) {
-      console.log('Environment changed, updating project ID from', currentProjectId.value, 'to', currentOpenapiValue);
-      currentProjectId.value = currentOpenapiValue;
-    }
-    
     const dataToSave = {
       allTestResults: allTestResults.value,
       testResults: testResults.value,
       filteredTestResults: filteredTestResults.value,
       timestamp: Date.now()
     };
+    
+    // Save to Caido database
+    try {
+      const result = await sdk.backend.saveTestResultsToDb(dataToSave);
+      if (result.kind === "Error") {
+        console.error('Failed to save test results to database:', result.error);
+      } else {
+        // Log database contents after save
+        await sdk.backend.logDatabaseContents();
+      }
+    } catch (dbError) {
+      console.error('Database save failed:', dbError);
+    }
+    
+    // Keep localStorage code for later migration (commented out but preserved)
+    // TODO: Remove localStorage code after migration button is implemented
+    /*
     localStorage.setItem('openapi-testing-results', JSON.stringify(dataToSave));
+    */
   } catch (error) {
-    // Silent fail if localStorage is not available
+    // Silent fail if database is not available
   }
 };
 
-const loadResultsFromStorage = () => {
+const loadResultsFromStorage = async () => {
   try {
+    // Load from Caido database
+    try {
+      const result = await sdk.backend.loadTestResultsFromDb();
+      if (result.kind === "Ok" && result.value) {
+        const data = result.value;
+        // Only load if data is recent (within last hour)
+        if (data.timestamp && (Date.now() - data.timestamp) < 3600000) {
+          allTestResults.value = data.allTestResults || [];
+          testResults.value = data.testResults || [];
+          filteredTestResults.value = data.filteredTestResults || [];
+        }
+      }
+    } catch (dbError) {
+      console.error('Database load failed:', dbError);
+    }
+    
+    // Keep localStorage code for later migration (commented out but preserved)
+    // TODO: Remove localStorage code after migration button is implemented
+    /*
     const saved = localStorage.getItem('openapi-testing-results');
     if (saved) {
       const data = JSON.parse(saved);
@@ -2532,8 +2456,9 @@ const loadResultsFromStorage = () => {
         filteredTestResults.value = data.filteredTestResults || [];
       }
     }
+    */
   } catch (error) {
-    // Silent fail if localStorage is not available
+    // Silent fail if database is not available
   }
 };
 
@@ -2544,273 +2469,193 @@ watch([allTestResults, testResults, filteredTestResults], () => {
   saveResultsToStorage();
 }, { deep: true });
 
-// Sessions are now saved via auto-save every 5 minutes and on validation
+// Save session whenever key values change (with debounce to avoid too many saves)
+let saveTimeout: ReturnType<typeof setTimeout> | null = null;
+watch([schemaText, baseUrl, workers, delayBetweenRequests, timeout, useRandomValues, useParameterFromDefinition, pathVariableValues, bodyVariableValues, customHeaders, testCases, testResults], () => {
+  if (saveTimeout) clearTimeout(saveTimeout);
+  saveTimeout = setTimeout(async () => {
+    await saveCurrentSession();
+  }, 1000); // Debounce: save 1 second after last change
+}, { deep: true });
 
 // Load results and sessions on mount
+let projectChangeHandler: { stop: () => void } | null = null;
+
 onMounted(async () => {
-  // Use environment variable for project identification
-  const setupEnvironmentVariable = async () => {
+  // Handle project change
+  const handleProjectChange = async (event: { projectId: string | undefined }) => {
     try {
-      const openapiValue = await sdk.env.getVar('openapi');
+      console.log('Project change event received, projectId:', event.projectId);
       
-      if (!openapiValue) {
-        const randomValue = Math.random().toString(36).substring(2, 15);
-        
-        const result = await sdk.backend.setEnvironmentVariable({
-          name: 'openapi',
-          value: randomValue,
-          secret: false,
-          global: true
-        });
-        
-        if (result.success) {
-          return randomValue;
+      // FIRST: Check if openapi environment variable is available for the new project
+      // This is the key we use to store sessions in the database
+      // NEVER use project ID (UUID) as a fallback - always use 'default' if env var doesn't exist
+      let newProjectKey: string;
+      try {
+        const openapiValue = await sdk.env.getVar('openapi');
+        if (openapiValue) {
+          console.log(`Found 'openapi' env var for new project: ${openapiValue}`);
+          newProjectKey = openapiValue;
         } else {
-          throw new Error(result.error);
+          // If no env var, use 'default' - DO NOT use project ID to avoid creating random keys
+          newProjectKey = 'default';
+          console.log(`No 'openapi' env var found, using 'default' key`);
         }
+      } catch (error) {
+        console.warn('Failed to get openapi env var:', error);
+        // Always fall back to 'default', never use project ID
+        newProjectKey = 'default';
+        console.log(`Using 'default' as fallback`);
       }
       
-      return openapiValue;
+      if (newProjectKey !== currentProjectId.value) {
+        const oldProjectId = currentProjectId.value;
+        console.log('Project changed from', oldProjectId, 'to', newProjectKey);
+        
+        // IMPORTANT: Save current project's sessions BEFORE switching
+        // This ensures we don't lose data when switching projects
+        if (sessions.value.length > 0 && oldProjectId && oldProjectId !== 'default') {
+          console.log('Saving sessions for old project before switch:', oldProjectId);
+          // Save with the old project ID (currentProjectId.value is still oldProjectId at this point)
+          await saveSessionsToStorage();
+        }
+        
+        // Now switch to the new project
+        currentProjectId.value = newProjectKey;
+        console.log('Set currentProjectId to:', newProjectKey);
+        
+        // Clear current sessions before loading new ones
+        sessions.value = [];
+        currentSessionId.value = null;
+        
+        // Load sessions for the new project
+        console.log('Loading sessions for new project:', newProjectKey);
+        await loadSessionsFromStorage();
+      } else {
+        console.log('Project key unchanged, no action needed');
+      }
     } catch (error) {
-      console.error('Environment variable setup failed:', error);
-      throw error;
+      console.error('Failed to handle project change:', error);
     }
   };
   
-  // Get project ID from environment variable
-  currentProjectId.value = await setupEnvironmentVariable();
+  // Set up project change listener FIRST, so we can get the initial project ID
+  projectChangeHandler = sdk.projects.onCurrentProjectChange(handleProjectChange);
   
-  // Load sessions from storage first
+  // Initialize with current project
+  // Try to get project key - the project change event should fire immediately with current project ID
+  // But we'll also try env var as fallback
+  const initialProjectKey = await getProjectKey();
+  currentProjectId.value = initialProjectKey;
+  
+  // Wait a bit for the project change event to fire (if it hasn't already)
+  // This ensures we get the actual project ID from the event
+  await new Promise(resolve => setTimeout(resolve, 100));
+  
+  // Load sessions from storage (using the project ID from the event if it fired)
   await loadSessionsFromStorage();
   
   // Then load results (this will be session-specific)
   loadResultsFromStorage();
   
-  // Set up environment variable change detection
-  const checkEnvironmentChange = async () => {
-    try {
-      const currentOpenapiValue = await sdk.env.getVar('openapi');
-      
-      // If environment variable doesn't exist or is empty, create it
-      if (!currentOpenapiValue) {
-        const randomValue = Math.random().toString(36).substring(2, 15);
-        
-        const result = await sdk.backend.setEnvironmentVariable({
-          name: 'openapi',
-          value: randomValue,
-          secret: false,
-          global: true
-        });
-        
-        if (result.success) {
-          currentProjectId.value = randomValue;
-          await loadSessionsFromStorage();
-        }
-      } else if (currentOpenapiValue !== currentProjectId.value) {
-        // Environment variable exists but value changed
-        currentProjectId.value = currentOpenapiValue;
-        await loadSessionsFromStorage();
-      }
-    } catch (error) {
-      console.warn('Failed to check environment change:', error);
-    }
-  };
-  
-  // Check for environment changes every 3 seconds
-  const environmentCheckInterval = setInterval(checkEnvironmentChange, 3000);
-  
   // Set up auto-save functionality
-  const autoSaveInterval = setInterval(() => {
-    saveCurrentSession();
+  const autoSaveInterval = setInterval(async () => {
+    await saveCurrentSession();
   }, 180000); // Auto-save every 3 minutes
   
   // Set up beforeunload event to save on page close
-  const handleBeforeUnload = () => {
-    saveCurrentSession();
+  const handleBeforeUnload = async () => {
+    await saveCurrentSession();
   };
   window.addEventListener('beforeunload', handleBeforeUnload);
   
   // Set up visibility change to save when tab becomes hidden
-  const handleVisibilityChange = () => {
+  const handleVisibilityChange = async () => {
     if (document.visibilityState === 'hidden') {
-      saveCurrentSession();
+      await saveCurrentSession();
     }
   };
   document.addEventListener('visibilitychange', handleVisibilityChange);
   
   // Cleanup on unmount
-  onUnmounted(() => {
+  onUnmounted(async () => {
     clearInterval(autoSaveInterval);
-    clearInterval(environmentCheckInterval);
+    if (projectChangeHandler) {
+      projectChangeHandler.stop(); // Stop listening to project changes
+    }
     window.removeEventListener('beforeunload', handleBeforeUnload);
     document.removeEventListener('visibilitychange', handleVisibilityChange);
-    saveCurrentSession(); // Final save before unmount
+    await saveCurrentSession(); // Final save before unmount
   });
 });
+
+
 </script>
 
 <template>
   <div class="h-full flex flex-col relative overflow-hidden">
-    <!-- Header -->
     <div class="flex items-center justify-between p-4 border-b border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800">
       <div class="flex items-center gap-4">
-      <div>
-        <h1 class="text-2xl font-bold text-gray-800 dark:text-gray-200">OpenAPI Tester</h1>
-        <p class="text-sm text-gray-600 dark:text-gray-400 mt-1">
-          Test your OpenAPI schemas with real HTTP requests
-        </p>
-    </div>
-        
-        <!-- Session Management -->
+        <div>
+          <h1 class="text-2xl font-bold text-gray-800 dark:text-gray-200">OpenAPI Tester</h1>
+          <p class="text-sm text-gray-600 dark:text-gray-400 mt-1">Test your OpenAPI schemas with real HTTP requests</p>
+        </div>
         <div class="flex items-center gap-1 bg-gray-100 dark:bg-gray-700 rounded-lg p-1">
-          <div 
-            v-for="session in sessions" 
-            :key="session.id"
-            :class="[
-              'flex items-center gap-2 px-3 py-1 rounded-md transition-all duration-200',
-              currentSessionId === session.id 
-                ? 'bg-blue-600 text-white border border-blue-500 shadow-md' 
-                : 'bg-white dark:bg-gray-600 text-gray-700 dark:text-gray-300 hover:bg-blue-50 dark:hover:bg-gray-500 border border-gray-200 dark:border-gray-500'
-            ]"
-          >
-            <!-- Session name with rename functionality -->
-            <div 
-              v-if="editingSessionId !== session.id"
-              class="flex items-center gap-2 cursor-pointer flex-1 group"
-              @click="() => loadSession(session.id)"
-              @dblclick="() => startRenameSession(session.id)"
-              title="Click to select, double-click to rename"
-            >
+          <div v-for="session in sessions" :key="session.id" :class="['flex items-center gap-2 px-3 py-1 rounded-md transition-all duration-200', currentSessionId === session.id ? 'bg-blue-600 text-white border border-blue-500 shadow-md' : 'bg-white dark:bg-gray-600 text-gray-700 dark:text-gray-300 hover:bg-blue-50 dark:hover:bg-gray-500 border border-gray-200 dark:border-gray-500']">
+            <div v-if="editingSessionId !== session.id" class="flex items-center gap-2 cursor-pointer flex-1 group" @click="() => loadSession(session.id)" @dblclick="() => startRenameSession(session.id)" title="Click to select, double-click to rename">
               <span class="text-sm font-medium">{{ session.name }}</span>
-              <!-- Rename hint icon - clickable -->
-              <i 
-                class="pi pi-pencil text-xs opacity-0 group-hover:opacity-60 transition-opacity ml-1 cursor-pointer hover:opacity-100"
-                :class="currentSessionId === session.id ? 'text-blue-200' : 'text-gray-400'"
-                title="Click to rename"
-                @click.stop="() => startRenameSession(session.id)"
-              ></i>
+              <i class="pi pi-pencil text-xs opacity-0 group-hover:opacity-60 transition-opacity ml-1 cursor-pointer hover:opacity-100" :class="currentSessionId === session.id ? 'text-blue-200' : 'text-gray-400'" title="Click to rename" @click.stop="() => startRenameSession(session.id)"></i>
             </div>
+            <input v-else v-model="editingSessionName" @blur="() => saveRenameSession(session.id)" @keydown="(e) => handleRenameKeydown(e, session.id)" class="text-sm font-medium bg-transparent border-none outline-none flex-1 min-w-0 px-1 rounded" :class="currentSessionId === session.id ? 'text-white bg-blue-500/20' : 'text-gray-700 dark:text-gray-300 bg-gray-100 dark:bg-gray-500'" :data-session-id="session.id" @click.stop />
             
-            <!-- Edit mode input -->
-            <input
-              v-else
-              v-model="editingSessionName"
-              @blur="() => saveRenameSession(session.id)"
-              @keydown="(e) => handleRenameKeydown(e, session.id)"
-              class="text-sm font-medium bg-transparent border-none outline-none flex-1 min-w-0 px-1 rounded"
-              :class="currentSessionId === session.id ? 'text-white bg-blue-500/20' : 'text-gray-700 dark:text-gray-300 bg-gray-100 dark:bg-gray-500'"
-              :data-session-id="session.id"
-              @click.stop
-            />
-            
-            <!-- Delete button with better visibility and spacing -->
-            <button 
-              @click.stop="() => deleteSession(session.id)"
-              :class="[
-                'ml-4 p-1.5 rounded-full border-2',
-                currentSessionId === session.id 
-                  ? 'text-white bg-red-500 border-red-500' 
-                  : 'text-white bg-red-500 border-red-500'
-              ]"
-              title="Delete Session"
-            >
+            <button @click.stop="() => deleteSession(session.id)" class="ml-4 p-1.5 rounded-full border-2 text-white bg-red-500 border-red-500" title="Delete Session">
               <i class="pi pi-times text-sm font-bold"></i>
             </button>
           </div>
           
-          <!-- Add New Session Button -->
-          <button 
-            @click="() => { const newSession = createNewSession(); sessions.push(newSession); loadSession(newSession.id); }"
-            class="flex items-center gap-1 px-2 py-1 rounded-md bg-blue-500 hover:bg-blue-600 text-white border border-blue-500 hover:border-blue-600 transition-colors text-sm"
-            title="Create New Session"
-          >
-            <i class="pi pi-plus text-sm"></i>
-            <span>Add</span>
+          <button @click="handleAddSession" class="flex items-center gap-1 px-2 py-1 rounded-md bg-blue-500 hover:bg-blue-600 text-white border border-blue-500 hover:border-blue-600 transition-colors text-sm" title="Create New Session">
+            <i class="pi pi-plus text-sm"></i><span>Add</span>
           </button>
         </div>
       </div>
       
-      <!-- GitHub Star Button -->
       <div class="flex items-center gap-2">
-        <button 
-          @click="openGitHubInBrowser"
-          class="inline-flex items-center gap-2 px-3 py-2 text-sm font-medium text-gray-700 dark:text-gray-300 bg-gray-100 dark:bg-gray-700 hover:bg-gray-200 dark:hover:bg-gray-600 rounded-md border border-gray-200 dark:border-gray-600 transition-colors duration-200 cursor-pointer"
-        >
-          <svg class="w-4 h-4 text-yellow-500" fill="currentColor" viewBox="0 0 24 24">
-            <path d="M12 17.27 18.18 21l-1.64-7.03L22 9.24l-7.19-.61L12 2 9.19 8.63 2 9.24l5.46 4.73L5.82 21z"/>
-          </svg>
-          Star on GitHub
+        <button v-if="hasLocalStorageData" @click="migrateLocalStorageToDb" class="inline-flex items-center gap-2 px-3 py-2 text-sm font-medium text-white bg-green-600 hover:bg-green-700 rounded-md border border-green-700 hover:border-green-800 transition-colors duration-200 cursor-pointer" title="Migrate data from localStorage to database">
+          <i class="pi pi-database text-sm"></i>Migrate to DB
         </button>
-  </div>
+        <button @click="showDatabaseContents" class="inline-flex items-center gap-2 px-3 py-2 text-sm font-medium text-blue-600 hover:text-blue-700 bg-blue-50 dark:bg-blue-900/20 hover:bg-blue-100 dark:hover:bg-blue-900/30 rounded-md border border-blue-200 dark:border-blue-800 hover:border-blue-300 dark:hover:border-blue-700 transition-colors duration-200 cursor-pointer" title="Show database contents in Caido console">
+          <i class="pi pi-list text-sm"></i>Show DB Contents
+        </button>
+        <button @click="openGitHubInBrowser" class="inline-flex items-center gap-2 px-3 py-2 text-sm font-medium text-gray-700 dark:text-gray-300 bg-gray-100 dark:bg-gray-700 hover:bg-gray-200 dark:hover:bg-gray-600 rounded-md border border-gray-200 dark:border-gray-600 transition-colors duration-200 cursor-pointer">
+          <svg class="w-4 h-4 text-yellow-500" fill="currentColor" viewBox="0 0 24 24"><path d="M12 17.27 18.18 21l-1.64-7.03L22 9.24l-7.19-.61L12 2 9.19 8.63 2 9.24l5.46 4.73L5.82 21z"/></svg>Star on GitHub
+        </button>
+      </div>
     </div>
 
-    <!-- Main Content Area -->
     <div class="flex-1 flex overflow-hidden">
-      <!-- Main Content -->
       <div class="flex-1 overflow-y-auto transition-all duration-300 ease-in-out">
         <div class="p-4">
-        <TabView v-model:activeIndex="activeTab" class="h-full">
-          <!-- Schema Input Tab -->
-          <TabPanel header="Input">
+          <TabView v-model:activeIndex="activeTab" class="h-full">
+            <TabPanel header="Input">
             <div class="mb-4 p-4 bg-blue-50 dark:bg-blue-900/20 rounded-lg">
               <h3 class="font-semibold text-blue-800 dark:text-blue-200 mb-2">Step 1: Input Your Schema</h3>
               <p class="text-sm text-blue-700 dark:text-blue-300">
                 Paste your OpenAPI schema (JSON format) here. The schema will be validated and test cases will be generated.
               </p>
             </div>
-            <div class="space-y-4">
-              <div>
-                <label class="block text-sm font-medium mb-2">Base URL</label>
-                <InputText 
-                  v-model="baseUrl" 
-                  placeholder="http://localhost:3000"
-                  class="w-full"
-                />
+              <div class="space-y-4">
+                <div><label class="block text-sm font-medium mb-2">Base URL</label><InputText v-model="baseUrl" placeholder="http://localhost:3000" class="w-full" /></div>
+                <div><label class="block text-sm font-medium mb-2">OpenAPI Schema (JSON)</label><Textarea v-model="schemaText" placeholder="Paste your OpenAPI schema here..." class="w-full h-64 font-mono text-sm" @input="validateSchema" /></div>
+                <div v-if="validationResult">
+                  <Message :severity="validationResult.valid ? 'success' : 'error'" :closable="false">
+                    <template #messageicon><i :class="validationResult.valid ? 'pi pi-check' : 'pi pi-exclamation-triangle'"></i></template>
+                    <div><div class="font-semibold">{{ validationResult.valid ? 'Schema is valid!' : 'Schema validation failed' }}</div><div v-if="validationResult.errors.length > 0" class="mt-2"><div v-for="error in validationResult.errors" :key="error" class="text-sm">• {{ error }}</div></div></div>
+                  </Message>
+                </div>
+                <Button label="Load Schema" @click="loadSchema" :disabled="!validationResult?.valid" class="w-full" />
               </div>
-              
-              <div>
-                <label class="block text-sm font-medium mb-2">OpenAPI Schema (JSON)</label>
-                <Textarea 
-                  v-model="schemaText" 
-                  placeholder="Paste your OpenAPI schema here..."
-                  class="w-full h-64 font-mono text-sm"
-                  @input="validateSchema"
-                />
-              </div>
-
-              <!-- Validation Results -->
-              <div v-if="validationResult">
-                <Message 
-                  :severity="validationResult.valid ? 'success' : 'error'"
-                  :closable="false"
-                >
-                  <template #messageicon>
-                    <i :class="validationResult.valid ? 'pi pi-check' : 'pi pi-exclamation-triangle'"></i>
-</template>
-                  <div>
-                    <div class="font-semibold">
-                      {{ validationResult.valid ? 'Schema is valid!' : 'Schema validation failed' }}
-                    </div>
-                    <div v-if="validationResult.errors.length > 0" class="mt-2">
-                      <div v-for="error in validationResult.errors" :key="error" class="text-sm">
-                        • {{ error }}
-                      </div>
-                    </div>
-                  </div>
-                </Message>
-              </div>
-
-              <Button 
-                label="Load Schema" 
-                @click="loadSchema" 
-                :disabled="!validationResult?.valid"
-                class="w-full"
-              />
-            </div>
-          </TabPanel>
-
-          <!-- Test Cases Tab -->
-          <TabPanel header="Endpoints">
+            </TabPanel>
+            <TabPanel header="Endpoints">
             <div v-if="!isSchemaLoaded" class="text-center py-8 text-gray-500">
               <i class="pi pi-list text-4xl mb-4"></i>
               <p>No schema loaded yet. Load a valid schema from the Input tab.</p>
@@ -2825,104 +2670,30 @@ onMounted(async () => {
               </div>
 
               <div class="space-y-4">
-                <!-- Configuration -->
                 <Card>
                   <template #title>Test Configuration</template>
                   <template #content>
-                                         <div class="grid grid-cols-1 md:grid-cols-4 gap-4">
-                       <div>
-                         <label class="block text-sm font-medium mb-2">Base URL</label>
-                         <InputText 
-                           v-model="baseUrl" 
-                           placeholder="http://localhost:3000"
-                           class="w-full"
-                         />
-                       </div>
-                       
-                       <div>
-                         <label class="block text-sm font-medium mb-2">Number of Workers</label>
-                         <InputNumber 
-                           v-model="workers" 
-                           :min="1" 
-                           :max="10"
-                           class="w-full"
-                           placeholder="1"
-                         />
-                       </div>
-                       
-                       <div>
-                         <label class="block text-sm font-medium mb-2">Delay Between Requests (ms)</label>
-                         <InputNumber 
-                           v-model="delayBetweenRequests" 
-                           :min="0" 
-                           :max="10000"
-                           class="w-full"
-                           placeholder="0"
-                         />
-                       </div>
-                       
-                       <div>
-                         <label class="block text-sm font-medium mb-2">Timeout (ms)</label>
-                         <InputNumber 
-                           v-model="timeout" 
-                           :min="1000" 
-                           :max="120000"
-                           class="w-full"
-                           placeholder="30000"
-                         />
-                       </div>
-                     </div>
-                     
-                     <div class="mt-4">
-                       <label class="block text-sm font-medium mb-2">Custom Headers</label>
-                       <Textarea 
-                         v-model="customHeaders" 
-                         placeholder="Authorization: Bearer token&#10;X-API-Key: your-api-key&#10;X-Custom-Header: value"
-                         class="w-full h-20 text-sm font-mono"
-                         rows="3"
-                       />
-                       <p class="text-xs text-gray-500 mt-1">
-                         Enter headers in format: Key: Value (one per line). If you add custom headers, they will replace the default headers completely.
-                       </p>
-                     </div>
-                     
-                     <div class="mt-4 space-y-3">
-                       <div class="flex items-center gap-2">
-                         <input 
-                           type="checkbox" 
-                           id="randomValues"
-                           v-model="useRandomValues"
-                           class="w-4 h-4 text-blue-600 bg-gray-100 border-gray-300 rounded focus:ring-blue-500 focus:ring-2"
-                         />
-                         <label for="randomValues" class="text-sm font-medium">Use Random Values for Empty Variables</label>
-                       </div>
-                       <p class="text-xs text-gray-500">
-                         When enabled, empty path variables will be filled with random strings instead of being left empty.
-                       </p>
-                       
-
-                     </div>
-                    
+                    <div class="grid grid-cols-1 md:grid-cols-4 gap-4">
+                      <div><label class="block text-sm font-medium mb-2">Base URL</label><InputText v-model="baseUrl" placeholder="http://localhost:3000" class="w-full" /></div>
+                      <div><label class="block text-sm font-medium mb-2">Number of Workers</label><InputNumber v-model="workers" :min="1" :max="10" class="w-full" placeholder="1" /></div>
+                      <div><label class="block text-sm font-medium mb-2">Delay Between Requests (ms)</label><InputNumber v-model="delayBetweenRequests" :min="0" :max="10000" class="w-full" placeholder="0" /></div>
+                      <div><label class="block text-sm font-medium mb-2">Timeout (ms)</label><InputNumber v-model="timeout" :min="1000" :max="120000" class="w-full" placeholder="30000" /></div>
+                    </div>
+                    <div class="mt-4">
+                      <label class="block text-sm font-medium mb-2">Custom Headers</label>
+                      <Textarea v-model="customHeaders" placeholder="Authorization: Bearer token&#10;X-API-Key: your-api-key&#10;X-Custom-Header: value" class="w-full h-20 text-sm font-mono" rows="3" />
+                      <p class="text-xs text-gray-500 mt-1">Enter headers in format: Key: Value (one per line). If you add custom headers, they will replace the default headers completely.</p>
+                    </div>
+                    <div class="mt-4 space-y-3">
+                      <div class="flex items-center gap-2"><input type="checkbox" id="randomValues" v-model="useRandomValues" class="w-4 h-4 text-blue-600 bg-gray-100 border-gray-300 rounded focus:ring-blue-500 focus:ring-2" /><label for="randomValues" class="text-sm font-medium">Use Random Values for Empty Variables</label></div>
+                      <p class="text-xs text-gray-500">When enabled, empty path variables will be filled with random strings instead of being left empty.</p>
+                    </div>
                     <div class="mt-4 flex gap-2">
-                      <Button 
-                        label="Test All Endpoints" 
-                        @click="runAllTests" 
-                        :loading="isLoading"
-                        :disabled="isLoading"
-                        class="flex-1"
-                      />
-                      <Button 
-                        v-if="isLoading || runningTests.size > 0"
-                        label="Stop Tests" 
-                        @click="stopAllTests" 
-                        severity="danger"
-                        size="small"
-                      />
+                      <Button label="Test All Endpoints" @click="runAllTests" :loading="isLoading" :disabled="isLoading" class="flex-1" />
+                      <Button v-if="isLoading || runningTests.size > 0" label="Stop Tests" @click="stopAllTests" severity="danger" size="small" />
                     </div>
                   </template>
                 </Card>
-
-                <!-- Test Cases Table -->
                 <Card>
                   <template #title>
                     <div class="flex items-center justify-between">
@@ -2946,807 +2717,261 @@ onMounted(async () => {
                     </div>
                   </template>
                   <template #content>
-                                                                                                                             <div class="border border-gray-200 dark:border-gray-700 rounded-lg overflow-hidden">
-                                            <!-- Table Header -->
-                                            <div class="bg-gray-100 dark:bg-gray-800 px-4 py-3 border-b border-gray-200 dark:border-gray-600">
-                                              <div class="grid grid-cols-5 gap-4 items-center text-sm font-medium text-gray-900 dark:text-gray-100">
-                                                <div>Method</div>
-                                                <div class="col-span-2">Path</div>
-                                                <div>Status</div>
-                                                <div>Actions</div>
-                                              </div>
-                                            </div>
-                                            
-                                            <!-- Table Rows -->
-                                            <div class="divide-y divide-gray-200 dark:divide-gray-600">
-                                              <div v-for="(testCase, index) in displayTestCases" :key="`${testCase.method}-${testCase.path}`" 
-                                                   :class="index % 2 === 0 ? 'bg-blue-200 dark:bg-blue-900/40' : 'bg-blue-300 dark:bg-blue-900/50'"
-                                                   :style="index % 2 === 0 ? 'background-color: #2f323a' : 'background-color: #353942'">
-                                                <!-- Main row -->
-                                                <div class="px-4 py-3 cursor-pointer" @click="toggleTestCaseExpansion(testCase)">
-                                                  <div class="grid grid-cols-5 gap-4 items-center">
-                                                    <!-- Method -->
-                                                    <div>
-                           <span class="px-2 py-1 rounded text-xs font-medium" 
-                                 :class="{
-                                                              'bg-blue-100 text-blue-800': testCase.method === 'GET',
-                                                              'bg-green-100 text-green-800': testCase.method === 'POST',
-                                                              'bg-yellow-100 text-yellow-800': testCase.method === 'PUT',
-                                                              'bg-red-100 text-red-800': testCase.method === 'DELETE'
-                                                            }">
-                                                        {{ testCase.method }}
-                           </span>
-                                                    </div>
-                                                    
-                                                    <!-- Path -->
-                                                    <div class="col-span-2">
-                                                      <code class="text-sm bg-gray-100 dark:bg-gray-700 text-gray-900 dark:text-gray-100 px-2 py-1 rounded whitespace-normal break-words">{{ testCase.path }}</code>
-                                                    </div>
-                                                    
-                                                    <!-- Status -->
-                                                    <div>
-                                                      <div v-if="getTestStatus(testCase)" class="flex items-center gap-2">
-                                                        <span :class="getStatusClass(getTestStatus(testCase)!.success)">
-                                                          {{ getStatusIcon(getTestStatus(testCase)!.success) }}
-                             </span>
-                                                        <span :class="getStatusClass(getTestStatus(testCase)!.success)">
-                                                          {{ getTestStatus(testCase)!.status }}
-                             </span>
-                           </div>
-                           <div v-else class="text-gray-400 text-sm">Not tested</div>
-                                                    </div>
-                                                    
-                                                    <!-- Actions -->
-                                                    <div class="flex items-center gap-2" @click.stop>
-                                                      <Button 
-                                                        :icon="isTestCaseExpanded(testCase) ? 'pi pi-chevron-down' : 'pi pi-chevron-right'"
-                                                        size="small"
-                                                        @click="toggleTestCaseExpansion(testCase)"
-                                                        severity="secondary"
-                                                        text
-                                                        :title="isTestCaseExpanded(testCase) ? 'Collapse' : 'Expand'"
-                                                      />
-                           <Button 
-                             label="Test" 
-                             size="small"
-                                                        @click="runSingleTest(testCase)"
-                                                        :loading="isTestRunning(testCase)"
-                                                        :disabled="isTestRunning(testCase) || isLoading"
-                                                      />
-                                                    </div>
-                                                  </div>
-                                                </div>
-                                                
-                                                <!-- Expansion content -->
-                                                <div v-if="isTestCaseExpanded(testCase)" 
-                                                     :class="index % 2 === 0 ? 'bg-blue-200 dark:bg-blue-900/40' : 'bg-blue-300 dark:bg-blue-900/50'"
-                                                     :style="index % 2 === 0 ? 'background-color: #2f323a' : 'background-color: #353942'"
-                                                     class="border-t border-gray-200 dark:border-gray-600 px-4 py-4">
-                                                  <div class="space-y-4">
-                                                    <!-- Path Variables -->
-                                                    <div v-if="testCase.pathVariables && testCase.pathVariables.length > 0">
-                                                      <h4 class="text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">Path Variables</h4>
-                                                      <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
-                                                        <div v-for="variable in testCase.pathVariables" :key="variable" class="flex items-center gap-2">
-                                                          <label class="text-sm text-gray-600 dark:text-gray-400 min-w-[100px]">{{ variable }}:</label>
-                                                          <InputText 
-                                                            v-model="testCasePathVariableValues[getTestCaseId(testCase)][variable]"
-                                                            :placeholder="`Value for ${variable}`"
-                                                            class="flex-1"
-                                                            size="small"
-                                                          />
-                                                        </div>
-                                                      </div>
-                                                    </div>
-                                                    
-                                                    <!-- Query Parameters -->
-                                                    <div v-if="testCase.parameters && testCase.parameters.filter((p: any) => p.in === 'query').length > 0">
-                                                      <h4 class="text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">Query Parameters</h4>
-                                                      <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
-                                                        <div v-for="param in testCase.parameters.filter((p: any) => p.in === 'query')" :key="param.name" class="flex items-center gap-2">
-                                                          <label class="text-sm text-gray-600 dark:text-gray-400 min-w-[100px]">{{ param.name }}:</label>
-                                                          <InputText 
-                                                            v-model="testCaseQueryParameterValues[getTestCaseId(testCase)][param.name]"
-                                                            :placeholder="`Value for ${param.name}`"
-                                                            class="flex-1"
-                                                            size="small"
-                                                          />
-                                                        </div>
-                                                      </div>
-                                                    </div>
-                                                    
-                                                    <!-- Body Variables -->
-                                                    <div v-if="testCase.bodyVariables && Object.keys(testCase.bodyVariables).length > 0">
-                                                      <h4 class="text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">Body Variables</h4>
-                                                      <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
-                                                        <div v-for="[key, value] in Object.entries(testCase.bodyVariables)" :key="key" class="flex items-center gap-2">
-                                                          <label class="text-sm text-gray-600 dark:text-gray-400 min-w-[100px]">{{ key }}:</label>
-                                                          <InputText 
-                                                            v-model="testCaseBodyVariableValues[getTestCaseId(testCase)][key]"
-                                                            :placeholder="`Value for ${key}`"
-                                                            class="flex-1"
-                                                            size="small"
-                                                          />
-                                                        </div>
-                                                      </div>
-                                                    </div>
-                                                    
-                                                    <div v-if="(!testCase.pathVariables || testCase.pathVariables.length === 0) && (!testCase.parameters || testCase.parameters.filter((p: any) => p.in === 'query').length === 0) && (!testCase.bodyVariables || Object.keys(testCase.bodyVariables).length === 0)">
-                                                      <p class="text-sm text-gray-500 dark:text-gray-400">No variables to configure for this endpoint.</p>
-                                                    </div>
-                                                  </div>
-                                                </div>
-                                              </div>
-                                            </div>
-                                          </div>
+                    <div class="border border-gray-200 dark:border-gray-700 rounded-lg overflow-hidden">
+                      <div class="bg-gray-100 dark:bg-gray-800 px-4 py-3 border-b border-gray-200 dark:border-gray-600">
+                        <div class="grid grid-cols-5 gap-4 items-center text-sm font-medium text-gray-900 dark:text-gray-100">
+                          <div>Method</div><div class="col-span-2">Path</div><div>Status</div><div>Actions</div>
+                        </div>
+                      </div>
+                      <div class="divide-y divide-gray-200 dark:divide-gray-600">
+                        <div v-for="(testCase, index) in displayTestCases" :key="`${testCase.method}-${testCase.path}`" :class="index % 2 === 0 ? 'bg-blue-200 dark:bg-blue-900/40' : 'bg-blue-300 dark:bg-blue-900/50'" :style="index % 2 === 0 ? 'background-color: #2f323a' : 'background-color: #353942'">
+                          <div class="px-4 py-3 cursor-pointer" @click="toggleTestCaseExpansion(testCase)">
+                            <div class="grid grid-cols-5 gap-4 items-center">
+                              <div><span class="px-2 py-1 rounded text-xs font-medium" :class="{'bg-blue-100 text-blue-800': testCase.method === 'GET', 'bg-green-100 text-green-800': testCase.method === 'POST', 'bg-yellow-100 text-yellow-800': testCase.method === 'PUT', 'bg-red-100 text-red-800': testCase.method === 'DELETE'}">{{ testCase.method }}</span></div>
+                              <div class="col-span-2"><code class="text-sm bg-gray-100 dark:bg-gray-700 text-gray-900 dark:text-gray-100 px-2 py-1 rounded whitespace-normal break-words">{{ testCase.path }}</code></div>
+                              <div><div v-if="getTestStatus(testCase)" class="flex items-center gap-2"><span :class="getStatusClass(getTestStatus(testCase)!.success)">{{ getStatusIcon(getTestStatus(testCase)!.success) }}</span><span :class="getStatusClass(getTestStatus(testCase)!.success)">{{ getTestStatus(testCase)!.status }}</span></div><div v-else class="text-gray-400 text-sm">Not tested</div></div>
+                              <div class="flex items-center gap-2" @click.stop>
+                                <Button :icon="isTestCaseExpanded(testCase) ? 'pi pi-chevron-down' : 'pi pi-chevron-right'" size="small" @click="toggleTestCaseExpansion(testCase)" severity="secondary" text :title="isTestCaseExpanded(testCase) ? 'Collapse' : 'Expand'" />
+                                <Button label="Test" size="small" @click="runSingleTest(testCase)" :loading="isTestRunning(testCase)" :disabled="isTestRunning(testCase) || isLoading" />
+                              </div>
+                            </div>
+                          </div>
+                          <div v-if="isTestCaseExpanded(testCase)" :class="index % 2 === 0 ? 'bg-blue-200 dark:bg-blue-900/40' : 'bg-blue-300 dark:bg-blue-900/50'" :style="index % 2 === 0 ? 'background-color: #2f323a' : 'background-color: #353942'" class="border-t border-gray-200 dark:border-gray-600 px-4 py-4">
+                            <div class="space-y-4">
+                              <div v-if="testCase.pathVariables && testCase.pathVariables.length > 0">
+                                <h4 class="text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">Path Variables</h4>
+                                <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+                                  <div v-for="variable in testCase.pathVariables" :key="variable" class="flex items-center gap-2">
+                                    <label class="text-sm text-gray-600 dark:text-gray-400 min-w-[100px]">{{ variable }}:</label>
+                                    <InputText v-model="testCasePathVariableValues[getTestCaseId(testCase)][variable]" :placeholder="`Value for ${variable}`" class="flex-1" size="small" />
+                                  </div>
+                                </div>
+                              </div>
+                              <div v-if="testCase.parameters && testCase.parameters.filter((p: any) => p.in === 'query').length > 0">
+                                <h4 class="text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">Query Parameters</h4>
+                                <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+                                  <div v-for="param in testCase.parameters.filter((p: any) => p.in === 'query')" :key="param.name" class="flex items-center gap-2">
+                                    <label class="text-sm text-gray-600 dark:text-gray-400 min-w-[100px]">{{ param.name }}:</label>
+                                    <InputText v-model="testCaseQueryParameterValues[getTestCaseId(testCase)][param.name]" :placeholder="`Value for ${param.name}`" class="flex-1" size="small" />
+                                  </div>
+                                </div>
+                              </div>
+                              <div v-if="testCase.bodyVariables && Object.keys(testCase.bodyVariables).length > 0">
+                                <h4 class="text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">Body Variables</h4>
+                                <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+                                  <div v-for="[key, value] in Object.entries(testCase.bodyVariables)" :key="key" class="flex items-center gap-2">
+                                    <label class="text-sm text-gray-600 dark:text-gray-400 min-w-[100px]">{{ key }}:</label>
+                                    <InputText v-model="testCaseBodyVariableValues[getTestCaseId(testCase)][key]" :placeholder="`Value for ${key}`" class="flex-1" size="small" />
+                                  </div>
+                                </div>
+                              </div>
+                              <div v-if="(!testCase.pathVariables || testCase.pathVariables.length === 0) && (!testCase.parameters || testCase.parameters.filter((p: any) => p.in === 'query').length === 0) && (!testCase.bodyVariables || Object.keys(testCase.bodyVariables).length === 0)">
+                                <p class="text-sm text-gray-500 dark:text-gray-400">No variables to configure for this endpoint.</p>
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
                   </template>
                 </Card>
               </div>
             </div>
           </TabPanel>
 
-          <!-- Schema Definition Tab -->
-          <TabPanel header="Definition">
-            <div v-if="!parsedSchema" class="text-center py-8 text-gray-500">
-              <i class="pi pi-file-text text-4xl mb-4"></i>
-              <p>No schema loaded yet. Load a valid schema from the Input tab to view its definition.</p>
-            </div>
-
-            <div v-else class="space-y-6">
-              <!-- API Info Section -->
-              <Card>
-                <template #title>
-                  <div class="flex items-center gap-2">
-                    <i class="pi pi-info-circle text-blue-500"></i>
-                    API Information
-                  </div>
-                </template>
-                <template #content>
-                  <div class="space-y-4">
-                    <!-- Basic Info -->
-                    <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
-                      <div>
-                        <label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Title</label>
-                        <p class="text-sm text-gray-900 dark:text-gray-100">{{ parsedSchema.info?.title || 'N/A' }}</p>
-                      </div>
-                      <div>
-                        <label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Version</label>
-                        <p class="text-sm text-gray-900 dark:text-gray-100">{{ parsedSchema.info?.version || 'N/A' }}</p>
-                      </div>
-                      <div v-if="parsedSchema.info?.description" class="md:col-span-2">
-                        <label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Description</label>
-                        <p class="text-sm text-gray-900 dark:text-gray-100">{{ parsedSchema.info.description }}</p>
-                      </div>
-                      <div v-if="parsedSchema.info?.contact" class="md:col-span-2">
-                        <label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Contact</label>
-                        <p class="text-sm text-gray-900 dark:text-gray-100">
-                          {{ parsedSchema.info.contact.name || '' }}
-                          {{ parsedSchema.info.contact.email ? `(${parsedSchema.info.contact.email})` : '' }}
-                          {{ parsedSchema.info.contact.url ? `- ${parsedSchema.info.contact.url}` : '' }}
-                        </p>
-                      </div>
-                      <div v-if="parsedSchema.info?.license" class="md:col-span-2">
-                        <label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">License</label>
-                        <p class="text-sm text-gray-900 dark:text-gray-100">
-                          {{ parsedSchema.info.license.name }}
-                          {{ parsedSchema.info.license.url ? `(${parsedSchema.info.license.url})` : '' }}
-                        </p>
-                      </div>
-                      <div v-if="parsedSchema.openapi || parsedSchema.swagger">
-                        <label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">OpenAPI Version</label>
-                        <p class="text-sm text-gray-900 dark:text-gray-100">{{ parsedSchema.openapi || parsedSchema.swagger }}</p>
-                      </div>
-                    </div>
-                    
-                    <!-- Server Information -->
-                    <div v-if="parsedSchema.servers || parsedSchema.host">
-                      <h4 class="font-medium text-gray-700 dark:text-gray-300 mb-2">Server Information</h4>
-                      <div class="space-y-2">
-                        <div v-if="parsedSchema.host">
-                          <span class="font-medium text-gray-600 dark:text-gray-400">Host:</span>
-                          <code class="ml-2 text-sm bg-gray-100 dark:bg-gray-700 px-2 py-1 rounded">{{ parsedSchema.host }}</code>
-                        </div>
-                        <div v-if="parsedSchema.basePath">
-                          <span class="font-medium text-gray-600 dark:text-gray-400">Base Path:</span>
-                          <code class="ml-2 text-sm bg-gray-100 dark:bg-gray-700 px-2 py-1 rounded">{{ parsedSchema.basePath }}</code>
-                        </div>
-                        <div v-if="parsedSchema.schemes">
-                          <span class="font-medium text-gray-600 dark:text-gray-400">Schemes:</span>
-                          <span class="ml-2 text-sm">{{ parsedSchema.schemes.join(', ') }}</span>
-                        </div>
-                        <div v-if="parsedSchema.servers">
-                          <span class="font-medium text-gray-600 dark:text-gray-400">Servers:</span>
-                          <div class="ml-2 space-y-1">
-                            <div v-for="(server, index) in parsedSchema.servers" :key="index" class="text-sm">
-                              <code class="bg-gray-100 dark:bg-gray-700 px-2 py-1 rounded">{{ server.url }}</code>
-                              <span v-if="server.description" class="ml-2 text-gray-500">- {{ server.description }}</span>
-                            </div>
-                          </div>
-                        </div>
-                      </div>
-                    </div>
-                    
-                    <!-- Tags Information -->
-                    <div v-if="parsedSchema.tags">
-                      <h4 class="font-medium text-gray-700 dark:text-gray-300 mb-2">Tags</h4>
-                      <div class="flex flex-wrap gap-2">
-                        <div v-for="tag in parsedSchema.tags" :key="tag.name" class="flex items-center gap-2">
-                          <span class="px-3 py-1 bg-indigo-500 text-white dark:bg-indigo-600 dark:text-indigo-100 text-xs rounded-full font-medium shadow-sm">{{ tag.name }}</span>
-                          <span v-if="tag.description" class="text-sm text-gray-600 dark:text-gray-400">{{ tag.description }}</span>
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-                </template>
-              </Card>
-
-              <!-- Paths Section -->
-              <Card>
-                <template #title>
-                  <div class="flex items-center gap-2">
-                    <i class="pi pi-link text-green-500"></i>
-                    API Endpoints ({{ Object.keys(parsedSchema.paths || {}).length }})
-                  </div>
-                </template>
-                <template #content>
-                  <div class="space-y-4">
-                    <div v-for="(methods, path) in parsedSchema.paths" :key="path" class="border border-gray-200 dark:border-gray-700 rounded-lg">
-                      <!-- Path Header -->
-                      <div 
-                        class="flex items-center justify-between p-3 bg-gray-50 dark:bg-gray-800 cursor-pointer hover:bg-gray-100 dark:hover:bg-gray-700"
-                        @click="togglePathExpansion(path)"
-                      >
-                        <div class="flex items-center gap-2">
-                          <i :class="isPathExpanded(path) ? 'pi pi-chevron-down' : 'pi pi-chevron-right'" class="text-gray-500"></i>
-                          <span class="font-mono text-sm font-medium text-gray-900 dark:text-gray-100">{{ path }}</span>
-                        </div>
-                        <div class="flex items-center gap-2">
-                          <div class="flex gap-1">
-                            <span v-for="method in Object.keys(methods)" :key="method" 
-                                  :class="['px-2 py-1 text-xs font-bold rounded', getMethodColor(method)]">
-                              {{ method.toUpperCase() }}
-                            </span>
-                          </div>
-                          <span class="text-xs text-gray-500">{{ Object.keys(methods).length }} methods</span>
-                        </div>
-                      </div>
-
-                      <!-- Path Methods -->
-                      <div v-if="isPathExpanded(path)" class="p-4 space-y-4">
-                        <div v-for="(operation, method) in methods" :key="method" class="border-l-4 border-gray-200 dark:border-gray-600 pl-4">
-                          <!-- Method Header -->
-                          <div class="flex items-center gap-3 mb-3">
-                            <span :class="['px-3 py-1 text-sm font-bold rounded shadow-sm', getMethodColor(method)]">
-                              {{ method.toUpperCase() }}
-                            </span>
-                            <h4 class="font-medium text-gray-900 dark:text-gray-100">
-                              {{ operation.summary || operation.operationId || `${method.toUpperCase()} ${path}` }}
-                            </h4>
-                          </div>
-
-                          <!-- Operation Details -->
-                          <div class="space-y-4 text-sm">
-                            <!-- Operation ID and Tags -->
-                            <div class="flex items-center gap-4 text-xs">
-                              <div v-if="operation.operationId">
-                                <span class="font-medium text-gray-600 dark:text-gray-400">Operation ID:</span>
-                                <code class="ml-1 bg-gray-100 dark:bg-gray-700 px-2 py-1 rounded">{{ operation.operationId }}</code>
-                              </div>
-                              <div v-if="operation.tags && operation.tags.length > 0">
-                                <span class="font-medium text-gray-600 dark:text-gray-400">Tags:</span>
-                                <div class="flex flex-wrap gap-1 mt-1">
-                                  <span v-for="tag in operation.tags" :key="tag" class="px-2 py-1 bg-emerald-500 text-white dark:bg-emerald-600 dark:text-emerald-100 rounded text-xs font-medium">{{ tag }}</span>
-                                </div>
-                              </div>
-                            </div>
-
-                            <div v-if="operation.description" class="text-gray-600 dark:text-gray-400">
-                              {{ operation.description }}
-                            </div>
-
-                            <!-- Consumes/Produces (Swagger 2.0) -->
-                            <div v-if="operation.consumes || operation.produces" class="flex items-center gap-4 text-xs">
-                              <div v-if="operation.consumes">
-                                <span class="font-medium text-gray-600 dark:text-gray-400">Consumes:</span>
-                                <span class="ml-1">{{ operation.consumes.join(', ') }}</span>
-                              </div>
-                              <div v-if="operation.produces">
-                                <span class="font-medium text-gray-600 dark:text-gray-400">Produces:</span>
-                                <span class="ml-1">{{ operation.produces.join(', ') }}</span>
-                              </div>
-                            </div>
-
-                            <!-- Parameters -->
-                            <div v-if="operation.parameters && operation.parameters.length > 0">
-                              <h5 class="font-medium text-gray-700 dark:text-gray-300 mb-2">Parameters</h5>
-                              <div class="space-y-3">
-                                <div v-for="param in operation.parameters" :key="param.name" class="border border-gray-200 dark:border-gray-600 rounded p-3">
-                                  <div class="flex items-center gap-2 mb-1">
-                                    <span class="font-mono text-gray-900 dark:text-gray-100 font-medium">{{ param.name }}</span>
-                                    <span class="px-2 py-1 bg-cyan-500 text-white dark:bg-cyan-600 dark:text-cyan-100 rounded text-xs font-medium">{{ param.in }}</span>
-                                    <span v-if="param.required" class="px-2 py-1 bg-red-500 text-white dark:bg-red-600 dark:text-red-100 rounded text-xs font-medium">required</span>
-                                    <span v-else class="px-2 py-1 bg-gray-500 text-white dark:bg-gray-600 dark:text-gray-100 rounded text-xs font-medium">optional</span>
-                                    <span v-if="param.schema" class="px-2 py-1 bg-blue-500 text-white dark:bg-blue-600 dark:text-blue-100 rounded text-xs font-medium">{{ formatSchemaType(param.schema) }}</span>
-                                  </div>
-                                  <div v-if="param.description" class="text-gray-600 dark:text-gray-400 text-xs">
-                                    {{ param.description }}
-                                  </div>
-                                  
-                                  <!-- Body Parameter Details (like Swagger UI) -->
-                                  <div v-if="param.in === 'body' && param.schema" class="mt-3">
-                                    <div class="bg-gray-50 dark:bg-gray-800 p-3 rounded">
-                                      <div class="text-xs text-gray-500 dark:text-gray-400 mb-2">Request Body Schema:</div>
-                                      <div class="text-sm font-mono text-gray-900 dark:text-gray-100 mb-2">{{ formatSchemaType(param.schema) }}</div>
-                                      
-                                      <!-- Schema Reference (if it's a $ref) -->
-                                      <div v-if="param.schema.$ref" class="mb-3">
-                                        <div class="text-xs text-gray-500 dark:text-gray-400 mb-1">References:</div>
-                                        <code class="text-xs bg-gray-100 dark:bg-gray-700 px-2 py-1 rounded">{{ param.schema.$ref }}</code>
-                                      </div>
-                                      
-                                      <!-- Example Value (like Swagger UI) -->
-                                      <div class="mb-3">
-                                        <div class="text-xs text-gray-500 dark:text-gray-400 mb-1">Example Value:</div>
-                                        <pre class="text-xs bg-gray-900 dark:bg-gray-700 text-gray-100 p-3 rounded overflow-auto max-h-48 font-mono">{{ formatExampleValue(param.schema) }}</pre>
-                                      </div>
-                                      
-                                      <!-- Schema Properties (if available) -->
-                                      <div v-if="param.schema.properties" class="space-y-2">
-                                        <div class="text-xs text-gray-500 dark:text-gray-400">Properties:</div>
-                                        <div class="space-y-1 pl-2">
-                                          <div v-for="(prop, propName) in param.schema.properties" :key="propName" class="flex items-center gap-2 text-xs">
-                                            <span class="font-mono text-gray-700 dark:text-gray-300 font-medium">{{ propName }}</span>
-                                            <span class="px-2 py-1 bg-blue-500 text-white dark:bg-blue-600 dark:text-blue-100 rounded font-medium">{{ formatSchemaType(prop) }}</span>
-                                            <span v-if="prop.description" class="text-gray-500">- {{ prop.description }}</span>
-                                            <span v-if="prop.example" class="text-gray-400">(example: {{ prop.example }})</span>
-                                            <span v-if="prop.default" class="text-gray-400">(default: {{ prop.default }})</span>
-                                          </div>
-                                        </div>
-                                      </div>
-                                      
-                                      <!-- Additional Properties -->
-                                      <div v-if="param.schema.additionalProperties" class="mt-2">
-                                        <div class="text-xs text-gray-500 dark:text-gray-400">Additional Properties:</div>
-                                        <span class="text-xs text-gray-700 dark:text-gray-300">{{ formatSchemaType(param.schema.additionalProperties) }}</span>
-                                      </div>
-                                    </div>
-                                  </div>
-                                  
-                                  <!-- Non-body Parameter Details -->
-                                  <div v-if="param.in !== 'body' && param.schema && param.schema.properties" class="mt-2">
-                                    <div class="text-xs text-gray-500 dark:text-gray-400 mb-1">Properties:</div>
-                                    <div class="space-y-1 pl-2">
-                                      <div v-for="(prop, propName) in param.schema.properties" :key="propName" class="flex items-center gap-2">
-                                        <span class="font-mono text-gray-700 dark:text-gray-300">{{ propName }}</span>
-                                        <span class="px-2 py-1 bg-blue-500 text-white dark:bg-blue-600 dark:text-blue-100 rounded text-xs font-medium">{{ formatSchemaType(prop) }}</span>
-                                        <span v-if="prop.description" class="text-gray-500">- {{ prop.description }}</span>
-                                      </div>
-                                    </div>
-                                  </div>
-                                </div>
-                              </div>
-                            </div>
-
-                            <!-- Request Body -->
-                            <div v-if="operation.requestBody">
-                              <h5 class="font-medium text-gray-700 dark:text-gray-300 mb-2">Request Body</h5>
-                              <div class="border border-gray-200 dark:border-gray-600 rounded p-3">
-                                <div v-if="operation.requestBody.required !== undefined" class="mb-2">
-                                  <span v-if="operation.requestBody.required" class="px-2 py-1 bg-red-500 text-white dark:bg-red-600 dark:text-red-100 rounded text-xs font-medium">required</span>
-                                  <span v-else class="px-2 py-1 bg-gray-500 text-white dark:bg-gray-600 dark:text-gray-100 rounded text-xs font-medium">optional</span>
-                                </div>
-                                <div v-if="operation.requestBody.content">
-                                  <div v-for="(content, mediaType) in operation.requestBody.content" :key="mediaType" class="mb-3">
-                                    <div class="text-gray-600 dark:text-gray-400 mb-1 font-medium">{{ mediaType }}</div>
-                                    <div v-if="content.schema" class="bg-gray-50 dark:bg-gray-800 p-3 rounded text-xs font-mono">
-                                      <div class="text-gray-900 dark:text-gray-100 mb-1">{{ formatSchemaType(content.schema) }}</div>
-                                      
-                                      <!-- Schema Reference (if it's a $ref) -->
-                                      <div v-if="content.schema.$ref" class="mb-2">
-                                        <div class="text-xs text-gray-500 dark:text-gray-400 mb-1">References:</div>
-                                        <code class="text-xs bg-gray-100 dark:bg-gray-700 px-2 py-1 rounded">{{ content.schema.$ref }}</code>
-                                      </div>
-                                      
-                                      <!-- Example Value (like Swagger UI) -->
-                                      <div class="mb-2">
-                                        <div class="text-xs text-gray-500 dark:text-gray-400 mb-1">Example Value:</div>
-                                        <pre class="text-xs bg-gray-900 dark:bg-gray-700 text-gray-100 p-2 rounded overflow-auto max-h-32 font-mono">{{ formatExampleValue(content.schema) }}</pre>
-                                      </div>
-                                      
-                                      <div v-if="content.schema.properties" class="space-y-1 pl-2">
-                                        <div v-for="(prop, propName) in content.schema.properties" :key="propName" class="flex items-center gap-2">
-                                          <span class="font-mono text-gray-700 dark:text-gray-300">{{ propName }}</span>
-                                          <span class="px-2 py-1 bg-blue-500 text-white dark:bg-blue-600 dark:text-blue-100 rounded text-xs font-medium">{{ formatSchemaType(prop) }}</span>
-                                          <span v-if="prop.description" class="text-gray-500">- {{ prop.description }}</span>
-                                        </div>
-                                      </div>
-                                    </div>
-                                  </div>
-                                </div>
-                              </div>
-                            </div>
-
-                            <!-- Responses -->
-                            <div v-if="operation.responses">
-                              <h5 class="font-medium text-gray-700 dark:text-gray-300 mb-2">Responses</h5>
-                              <div class="space-y-3">
-                                <div v-for="(response, statusCode) in operation.responses" :key="statusCode" class="border border-gray-200 dark:border-gray-600 rounded p-3">
-                                  <div class="flex items-center gap-2 mb-2">
-                                    <span :class="[
-                                      'px-2 py-1 rounded font-medium text-xs',
-                                      statusCode.startsWith('2') ? 'bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200' :
-                                      statusCode.startsWith('4') ? 'bg-yellow-100 text-yellow-800 dark:bg-yellow-900 dark:text-yellow-200' :
-                                      statusCode.startsWith('5') ? 'bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200' :
-                                      'bg-gray-100 text-gray-800 dark:bg-gray-900 dark:text-gray-200'
-                                    ]">
-                                      {{ statusCode }}
-                                    </span>
-                                    <span class="text-gray-600 dark:text-gray-400 font-medium">{{ response.description || 'No description' }}</span>
-                                  </div>
-                                  <div v-if="response.content" class="space-y-2">
-                                    <div v-for="(content, mediaType) in response.content" :key="mediaType">
-                                      <div class="text-gray-600 dark:text-gray-400 text-xs mb-1">{{ mediaType }}</div>
-                                      <div v-if="content.schema" class="bg-gray-50 dark:bg-gray-800 p-2 rounded text-xs font-mono">
-                                        {{ formatSchemaType(content.schema) }}
-                                      </div>
-                                    </div>
-                                  </div>
-                                  <div v-if="response.schema" class="bg-gray-50 dark:bg-gray-800 p-2 rounded text-xs font-mono">
-                                    {{ formatSchemaType(response.schema) }}
-                                  </div>
-                                </div>
-                              </div>
-                            </div>
-                          </div>
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-                </template>
-              </Card>
-
-              <!-- Components Section -->
-              <Card v-if="parsedSchema.components || parsedSchema.definitions">
-                <template #title>
-                  <div class="flex items-center gap-2">
-                    <i class="pi pi-cube text-purple-500"></i>
-                    Components & Definitions
-                  </div>
-                </template>
-                <template #content>
-                  <div class="space-y-6">
-                    <!-- Schemas (OpenAPI 3.x) -->
-                    <div v-if="parsedSchema.components?.schemas">
-                      <h4 class="font-medium text-gray-700 dark:text-gray-300 mb-3">Schemas</h4>
-                      <div class="space-y-3">
-                        <div v-for="(schema, name) in parsedSchema.components.schemas" :key="name" class="border border-gray-200 dark:border-gray-700 rounded-lg">
-                          <div 
-                            class="flex items-center justify-between p-3 bg-gray-50 dark:bg-gray-800 cursor-pointer hover:bg-gray-100 dark:hover:bg-gray-700"
-                            @click="toggleComponentExpansion(name)"
-                          >
-                            <div class="flex items-center gap-3">
-                              <i :class="isComponentExpanded(name) ? 'pi pi-chevron-down' : 'pi pi-chevron-right'" class="text-gray-500"></i>
-                              <span class="font-medium text-gray-900 dark:text-gray-100">{{ name }}</span>
-                              <span class="px-2 py-1 bg-blue-500 text-white dark:bg-blue-600 dark:text-blue-100 rounded text-xs font-medium">{{ formatSchemaType(schema) }}</span>
-                            </div>
-                            <div class="flex items-center gap-2 text-xs text-gray-500">
-                              <span v-if="schema.properties">{{ Object.keys(schema.properties).length }} properties</span>
-                              <span v-if="schema.required">{{ schema.required.length }} required</span>
-                            </div>
-                          </div>
-                          
-                          <div v-if="isComponentExpanded(name)" class="p-4 space-y-4">
-                            <div v-if="schema.description" class="text-sm text-gray-600 dark:text-gray-400 bg-gray-50 dark:bg-gray-800 p-3 rounded">
-                              {{ schema.description }}
-                            </div>
-                            
-                            <!-- Schema Type Info -->
-                            <div class="flex items-center gap-4 text-xs">
-                              <div v-if="schema.type">
-                                <span class="font-medium text-gray-600 dark:text-gray-400">Type:</span>
-                                <span class="ml-1 px-2 py-1 bg-gray-100 dark:bg-gray-700 rounded">{{ schema.type }}</span>
-                              </div>
-                              <div v-if="schema.format">
-                                <span class="font-medium text-gray-600 dark:text-gray-400">Format:</span>
-                                <span class="ml-1 px-2 py-1 bg-gray-100 dark:bg-gray-700 rounded">{{ schema.format }}</span>
-                              </div>
-                              <div v-if="schema.example">
-                                <span class="font-medium text-gray-600 dark:text-gray-400">Example:</span>
-                                <code class="ml-1 bg-gray-100 dark:bg-gray-700 px-2 py-1 rounded">{{ schema.example }}</code>
-                              </div>
-                            </div>
-                            
-                            <!-- Properties -->
-                            <div v-if="schema.properties" class="space-y-3">
-                              <h5 class="font-medium text-gray-700 dark:text-gray-300">Properties</h5>
-                              <div class="space-y-2">
-                                <div v-for="(prop, propName) in schema.properties" :key="propName" class="border border-gray-200 dark:border-gray-600 rounded p-3">
-                                  <div class="flex items-center gap-2 mb-1">
-                                    <span class="font-medium text-gray-900 dark:text-gray-100">{{ propName }}</span>
-                                    <span class="px-2 py-1 bg-blue-500 text-white dark:bg-blue-600 dark:text-blue-100 rounded text-xs font-medium">{{ formatSchemaType(prop) }}</span>
-                                    <span v-if="schema.required && schema.required.includes(propName)" class="px-2 py-1 bg-red-500 text-white dark:bg-red-600 dark:text-red-100 rounded text-xs font-medium">required</span>
-                                    <span v-else class="px-2 py-1 bg-gray-500 text-white dark:bg-gray-600 dark:text-gray-100 rounded text-xs font-medium">optional</span>
-                                  </div>
-                                  <div v-if="prop.description" class="text-sm text-gray-600 dark:text-gray-400 mb-2">
-                                    {{ prop.description }}
-                                  </div>
-                                  <div class="flex items-center gap-4 text-xs">
-                                    <div v-if="prop.format">
-                                      <span class="font-medium text-gray-600 dark:text-gray-400">Format:</span>
-                                      <span class="ml-1 px-2 py-1 bg-gray-100 dark:bg-gray-700 rounded">{{ prop.format }}</span>
-                                    </div>
-                                    <div v-if="prop.example">
-                                      <span class="font-medium text-gray-600 dark:text-gray-400">Example:</span>
-                                      <code class="ml-1 bg-gray-100 dark:bg-gray-700 px-2 py-1 rounded">{{ prop.example }}</code>
-                                    </div>
-                                    <div v-if="prop.default">
-                                      <span class="font-medium text-gray-600 dark:text-gray-400">Default:</span>
-                                      <code class="ml-1 bg-gray-100 dark:bg-gray-700 px-2 py-1 rounded">{{ prop.default }}</code>
-                                    </div>
-                                  </div>
-                                  <div v-if="prop.enum" class="mt-2">
-                                    <div class="text-xs text-gray-500 dark:text-gray-400 mb-1">Enum values:</div>
-                                    <div class="flex flex-wrap gap-1">
-                                      <span v-for="enumValue in prop.enum" :key="enumValue" class="px-2 py-1 bg-gray-100 dark:bg-gray-700 text-gray-700 dark:text-gray-300 rounded text-xs">{{ enumValue }}</span>
-                                    </div>
-                                  </div>
-                                </div>
-                              </div>
-                            </div>
-                            
-                            <!-- Required Fields Summary -->
-                            <div v-if="schema.required && schema.required.length > 0" class="bg-yellow-50 dark:bg-yellow-900/20 p-3 rounded">
-                              <h6 class="font-medium text-yellow-800 dark:text-yellow-200 mb-2">Required Fields</h6>
-                              <div class="flex flex-wrap gap-2">
-                                <span v-for="requiredField in schema.required" :key="requiredField" class="px-2 py-1 bg-yellow-100 text-yellow-800 dark:bg-yellow-900 dark:text-yellow-200 rounded text-xs font-medium">{{ requiredField }}</span>
-                              </div>
-                            </div>
-                          </div>
-                        </div>
-                      </div>
-                    </div>
-                    
-                    <!-- Definitions (Swagger 2.0) -->
-                    <div v-if="parsedSchema.definitions">
-                      <h4 class="font-medium text-gray-700 dark:text-gray-300 mb-3">Definitions</h4>
-                      <div class="space-y-3">
-                        <div v-for="(schema, name) in parsedSchema.definitions" :key="name" class="border border-gray-200 dark:border-gray-700 rounded-lg">
-                          <div 
-                            class="flex items-center justify-between p-3 bg-gray-50 dark:bg-gray-800 cursor-pointer hover:bg-gray-100 dark:hover:bg-gray-700"
-                            @click="toggleComponentExpansion(name)"
-                          >
-                            <div class="flex items-center gap-3">
-                              <i :class="isComponentExpanded(name) ? 'pi pi-chevron-down' : 'pi pi-chevron-right'" class="text-gray-500"></i>
-                              <span class="font-medium text-gray-900 dark:text-gray-100">{{ name }}</span>
-                              <span class="px-2 py-1 bg-blue-500 text-white dark:bg-blue-600 dark:text-blue-100 rounded text-xs font-medium">{{ formatSchemaType(schema) }}</span>
-                            </div>
-                            <div class="flex items-center gap-2 text-xs text-gray-500">
-                              <span v-if="schema.properties">{{ Object.keys(schema.properties).length }} properties</span>
-                              <span v-if="schema.required">{{ schema.required.length }} required</span>
-                            </div>
-                          </div>
-                          
-                          <div v-if="isComponentExpanded(name)" class="p-4 space-y-4">
-                            <div v-if="schema.description" class="text-sm text-gray-600 dark:text-gray-400 bg-gray-50 dark:bg-gray-800 p-3 rounded">
-                              {{ schema.description }}
-                            </div>
-                            
-                            <!-- Schema Type Info -->
-                            <div class="flex items-center gap-4 text-xs">
-                              <div v-if="schema.type">
-                                <span class="font-medium text-gray-600 dark:text-gray-400">Type:</span>
-                                <span class="ml-1 px-2 py-1 bg-gray-100 dark:bg-gray-700 rounded">{{ schema.type }}</span>
-                              </div>
-                              <div v-if="schema.format">
-                                <span class="font-medium text-gray-600 dark:text-gray-400">Format:</span>
-                                <span class="ml-1 px-2 py-1 bg-gray-100 dark:bg-gray-700 rounded">{{ schema.format }}</span>
-                              </div>
-                            </div>
-                            
-                            <!-- Properties -->
-                            <div v-if="schema.properties" class="space-y-3">
-                              <h5 class="font-medium text-gray-700 dark:text-gray-300">Properties</h5>
-                              <div class="space-y-2">
-                                <div v-for="(prop, propName) in schema.properties" :key="propName" class="border border-gray-200 dark:border-gray-600 rounded p-3">
-                                  <div class="flex items-center gap-2 mb-1">
-                                    <span class="font-medium text-gray-900 dark:text-gray-100">{{ propName }}</span>
-                                    <span class="px-2 py-1 bg-blue-500 text-white dark:bg-blue-600 dark:text-blue-100 rounded text-xs font-medium">{{ formatSchemaType(prop) }}</span>
-                                    <span v-if="schema.required && schema.required.includes(propName)" class="px-2 py-1 bg-red-500 text-white dark:bg-red-600 dark:text-red-100 rounded text-xs font-medium">required</span>
-                                    <span v-else class="px-2 py-1 bg-gray-500 text-white dark:bg-gray-600 dark:text-gray-100 rounded text-xs font-medium">optional</span>
-                                  </div>
-                                  <div v-if="prop.description" class="text-sm text-gray-600 dark:text-gray-400 mb-2">
-                                    {{ prop.description }}
-                                  </div>
-                                  <div class="flex items-center gap-4 text-xs">
-                                    <div v-if="prop.format">
-                                      <span class="font-medium text-gray-600 dark:text-gray-400">Format:</span>
-                                      <span class="ml-1 px-2 py-1 bg-gray-100 dark:bg-gray-700 rounded">{{ prop.format }}</span>
-                                    </div>
-                                    <div v-if="prop.example">
-                                      <span class="font-medium text-gray-600 dark:text-gray-400">Example:</span>
-                                      <code class="ml-1 bg-gray-100 dark:bg-gray-700 px-2 py-1 rounded">{{ prop.example }}</code>
-                                    </div>
-                                    <div v-if="prop.default">
-                                      <span class="font-medium text-gray-600 dark:text-gray-400">Default:</span>
-                                      <code class="ml-1 bg-gray-100 dark:bg-gray-700 px-2 py-1 rounded">{{ prop.default }}</code>
-                                    </div>
-                                  </div>
-                                  <div v-if="prop.enum" class="mt-2">
-                                    <div class="text-xs text-gray-500 dark:text-gray-400 mb-1">Enum values:</div>
-                                    <div class="flex flex-wrap gap-1">
-                                      <span v-for="enumValue in prop.enum" :key="enumValue" class="px-2 py-1 bg-gray-100 dark:bg-gray-700 text-gray-700 dark:text-gray-300 rounded text-xs">{{ enumValue }}</span>
-                                    </div>
-                                  </div>
-                                </div>
-                              </div>
-                            </div>
-                            
-                            <!-- Required Fields Summary -->
-                            <div v-if="schema.required && schema.required.length > 0" class="bg-yellow-50 dark:bg-yellow-900/20 p-3 rounded">
-                              <h6 class="font-medium text-yellow-800 dark:text-yellow-200 mb-2">Required Fields</h6>
-                              <div class="flex flex-wrap gap-2">
-                                <span v-for="requiredField in schema.required" :key="requiredField" class="px-2 py-1 bg-yellow-100 text-yellow-800 dark:bg-yellow-900 dark:text-yellow-200 rounded text-xs font-medium">{{ requiredField }}</span>
-                              </div>
-                            </div>
-                          </div>
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-                </template>
-              </Card>
-            </div>
-          </TabPanel>
-
-          <!-- Test Results Tab -->
-          <TabPanel header="Results">
-            <div class="space-y-4">
-              <!-- Query Bar (Commented out) -->
-              <!--
-              <Card>
-                <template #title>Query Test Results</template>
-                <template #content>
-                  <div class="space-y-4">
-                    <div class="flex items-center gap-4">
-                      <div class="flex-1">
-                        <label for="httpql-query" class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
-                          Query Test Results
-                        </label>
-                        <div class="flex gap-2">
-                          <InputText
-                            id="httpql-query"
-                            v-model="httpqlQuery"
-                            placeholder="Enter query (e.g., resp.code.eq:200, method.eq:GET, url.eq:'/users')"
-                            class="flex-1"
-                            @keyup.enter="runHttpqlQuery"
-                          />
-                          <Button 
-                            label="Run Query" 
-                            icon="pi pi-play"
-                            @click="runHttpqlQuery"
-                            :loading="isHttpqlRunning"
-                            :disabled="!httpqlQuery.trim()"
-                          />
-                          <Button 
-                            v-if="isQueryActive"
-                            label="Clear" 
-                            icon="pi pi-times"
-                            @click="clearQuery"
-                            severity="secondary"
-                            size="small"
-                          />
-                        </div>
-                      </div>
-                    </div>
-                    
-                    <div v-if="httpqlResults" class="mt-4">
-                      <h4 class="font-medium text-gray-800 dark:text-gray-200 mb-2">Query Results</h4>
-                      <div class="bg-gray-50 dark:bg-gray-800 p-4 rounded-lg">
-                        <pre class="text-sm font-mono text-gray-900 dark:text-gray-100 overflow-auto max-h-64">{{ httpqlResults }}</pre>
-                      </div>
-                    </div>
-                  </div>
-                </template>
-              </Card>
-              -->
-
-              <!-- Test Results Section -->
-              <div v-if="!hasResults" class="text-center py-8 text-gray-500">
-                <i class="pi pi-chart-bar text-4xl mb-4"></i>
-                <p>No test results yet. Run tests from the Endpoints tab.</p>
+            <TabPanel header="Definition">
+              <div v-if="!parsedSchema" class="text-center py-8 text-gray-500">
+                <i class="pi pi-file-text text-4xl mb-4"></i>
+                <p>No schema loaded yet. Load a valid schema from the Input tab to view its definition.</p>
               </div>
-              
-
- 
-              <div v-else>
-                <!-- Results Table -->
+              <div v-else class="space-y-6">
                 <Card>
-                  <template #title>
-                    <div class="flex items-center justify-between">
-                      <span>
-                    {{ isQueryActive ? 'Filtered Test Results' : 'Test Results' }}
-                    <span v-if="isQueryActive" class="text-sm text-gray-500 ml-2">
-                      ({{ filteredTestResults.length }} of {{ allTestResults.length }})
-                    </span>
-                      </span>
-                      <Button 
-                        label="Clear All Results" 
-                        icon="pi pi-trash"
-                        @click="clearAllResults"
-                        severity="danger"
-                        size="small"
-                      />
-                    </div>
-                  </template>
+                  <template #title><div class="flex items-center gap-2"><i class="pi pi-info-circle text-blue-500"></i>API Information</div></template>
                   <template #content>
-                    <div class="space-y-2">
-                      <div v-for="data in (isQueryActive ? filteredTestResults : allTestResults)" :key="getResultId(data)" class="border border-gray-200 dark:border-gray-700 rounded-lg">
-                        <!-- Main Result Row -->
-                        <div class="p-4 hover:bg-gray-50 dark:hover:bg-gray-700 cursor-pointer" @click="toggleResultExpansion(getResultId(data))">
-                          <div class="flex items-center justify-between">
-                            <div class="flex items-center gap-4 flex-1">
-                              <!-- Test Name -->
-                              <div class="flex-1">
-                                <div class="font-medium">{{ data.testCase.name }}</div>
-                                <div class="text-sm text-gray-500">{{ data.testCase.description }}</div>
-                              </div>
-                              
-                              <!-- Method -->
-                              <span class="px-2 py-1 rounded text-xs font-medium" 
-                                    :class="{
-                                      'bg-blue-100 text-blue-800': data.testCase.method === 'GET',
-                                      'bg-green-100 text-green-800': data.testCase.method === 'POST',
-                                      'bg-yellow-100 text-yellow-800': data.testCase.method === 'PUT',
-                                      'bg-red-100 text-red-800': data.testCase.method === 'DELETE'
-                                    }">
-                                {{ data.testCase.method }}
-                              </span>
-                              
-                              <!-- Path -->
-                              <code class="text-sm bg-gray-100 dark:bg-gray-700 text-gray-900 dark:text-gray-100 px-2 py-1 rounded">{{ data.testCase.path }}</code>
-                              
-                              <!-- Status -->
-                              <div class="flex items-center gap-2">
-                                <span :class="getStatusClass(data.success)">{{ getStatusIcon(data.success) }}</span>
-                                <span :class="getStatusClass(data.success)">{{ data.status }}</span>
-                              </div>
-                              
-                              <!-- Response Time -->
-                              <span class="text-sm">{{ formatResponseTime(data.responseTime) }}</span>
-                              
-                              <!-- Response Size -->
-                              <span class="text-sm text-gray-600 dark:text-gray-400">{{ getResponseSize(data.response) }}</span>
-                            </div>
-                            
-                            <!-- Expand/Collapse Icon -->
-                            <Button 
-                              :icon="isResultExpanded(getResultId(data)) ? 'pi pi-chevron-up' : 'pi pi-chevron-down'"
-                              size="small"
-                              text
-                              rounded
-                              class="text-gray-500"
-                            />
-                          </div>
-                          
-                          <!-- Path Variables Used (if any) -->
-                          <div v-if="data.combination && Object.keys(data.combination).length > 0" class="mt-2 text-sm text-gray-600">
-                            <span class="font-medium">Variables:</span>
-                            <span v-for="(value, key) in data.combination" :key="key" class="ml-2">
-                              {{ key }} = "{{ value }}"
-                            </span>
+                    <div class="space-y-4">
+                      <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                        <div><label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Title</label><p class="text-sm text-gray-900 dark:text-gray-100">{{ parsedSchema.info?.title || 'N/A' }}</p></div>
+                        <div><label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Version</label><p class="text-sm text-gray-900 dark:text-gray-100">{{ parsedSchema.info?.version || 'N/A' }}</p></div>
+                        <div v-if="parsedSchema.info?.description" class="md:col-span-2"><label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Description</label><p class="text-sm text-gray-900 dark:text-gray-100">{{ parsedSchema.info.description }}</p></div>
+                        <div v-if="parsedSchema.info?.contact" class="md:col-span-2"><label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Contact</label><p class="text-sm text-gray-900 dark:text-gray-100">{{ parsedSchema.info.contact.name || '' }} {{ parsedSchema.info.contact.email ? `(${parsedSchema.info.contact.email})` : '' }} {{ parsedSchema.info.contact.url ? `- ${parsedSchema.info.contact.url}` : '' }}</p></div>
+                        <div v-if="parsedSchema.info?.license" class="md:col-span-2"><label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">License</label><p class="text-sm text-gray-900 dark:text-gray-100">{{ parsedSchema.info.license.name }} {{ parsedSchema.info.license.url ? `(${parsedSchema.info.license.url})` : '' }}</p></div>
+                        <div v-if="parsedSchema.openapi || parsedSchema.swagger"><label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">OpenAPI Version</label><p class="text-sm text-gray-900 dark:text-gray-100">{{ parsedSchema.openapi || parsedSchema.swagger }}</p></div>
+                      </div>
+                      <div v-if="parsedSchema.servers || parsedSchema.host">
+                        <h4 class="font-medium text-gray-700 dark:text-gray-300 mb-2">Server Information</h4>
+                        <div class="space-y-2">
+                          <div v-if="parsedSchema.host"><span class="font-medium text-gray-600 dark:text-gray-400">Host:</span><code class="ml-2 text-sm bg-gray-100 dark:bg-gray-700 px-2 py-1 rounded">{{ parsedSchema.host }}</code></div>
+                          <div v-if="parsedSchema.basePath"><span class="font-medium text-gray-600 dark:text-gray-400">Base Path:</span><code class="ml-2 text-sm bg-gray-100 dark:bg-gray-700 px-2 py-1 rounded">{{ parsedSchema.basePath }}</code></div>
+                          <div v-if="parsedSchema.schemes"><span class="font-medium text-gray-600 dark:text-gray-400">Schemes:</span><span class="ml-2 text-sm">{{ parsedSchema.schemes.join(', ') }}</span></div>
+                          <div v-if="parsedSchema.servers"><span class="font-medium text-gray-600 dark:text-gray-400">Servers:</span><div class="ml-2 space-y-1"><div v-for="(server, index) in parsedSchema.servers" :key="index" class="text-sm"><code class="bg-gray-100 dark:bg-gray-700 px-2 py-1 rounded">{{ server.url }}</code><span v-if="server.description" class="ml-2 text-gray-500">- {{ server.description }}</span></div></div></div>
+                        </div>
+                      </div>
+                      <div v-if="parsedSchema.tags">
+                        <h4 class="font-medium text-gray-700 dark:text-gray-300 mb-2">Tags</h4>
+                        <div class="flex flex-wrap gap-2">
+                          <div v-for="tag in parsedSchema.tags" :key="tag.name" class="flex items-center gap-2">
+                            <span class="px-3 py-1 bg-indigo-500 text-white dark:bg-indigo-600 dark:text-indigo-100 text-xs rounded-full font-medium shadow-sm">{{ tag.name }}</span>
+                            <span v-if="tag.description" class="text-sm text-gray-600 dark:text-gray-400">{{ tag.description }}</span>
                           </div>
                         </div>
-                        
-                        <!-- Native Caido Request/Response Viewer -->
-                        <div v-if="isResultExpanded(getResultId(data))" class="border-t border-gray-200 dark:border-gray-700 h-[600px]">
-                          <div class="flex h-full">
-                            <!-- Request Editor -->
-                            <div class="w-1/2 border-r border-gray-200 dark:border-gray-700">
-                              <div class="h-full" :ref="el => setRequestEditorContainer(el, getResultId(data))"></div>
+                      </div>
+                    </div>
+                  </template>
+                </Card>
+                <Card>
+                  <template #title><div class="flex items-center gap-2"><i class="pi pi-link text-green-500"></i>API Endpoints ({{ Object.keys(parsedSchema.paths || {}).length }})</div></template>
+                  <template #content>
+                    <div class="space-y-4">
+                      <div v-for="(methods, path) in parsedSchema.paths" :key="path" class="border border-gray-200 dark:border-gray-700 rounded-lg">
+                        <div class="flex items-center justify-between p-3 bg-gray-50 dark:bg-gray-800 cursor-pointer hover:bg-gray-100 dark:hover:bg-gray-700" @click="togglePathExpansion(path)">
+                          <div class="flex items-center gap-2"><i :class="isPathExpanded(path) ? 'pi pi-chevron-down' : 'pi pi-chevron-right'" class="text-gray-500"></i><span class="font-mono text-sm font-medium text-gray-900 dark:text-gray-100">{{ path }}</span></div>
+                          <div class="flex items-center gap-2"><div class="flex gap-1"><span v-for="method in Object.keys(methods)" :key="method" :class="['px-2 py-1 text-xs font-bold rounded', getMethodColor(method)]">{{ method.toUpperCase() }}</span></div><span class="text-xs text-gray-500">{{ Object.keys(methods).length }} methods</span></div>
+                        </div>
+                        <div v-if="isPathExpanded(path)" class="p-4 space-y-4">
+                          <div v-for="(operation, method) in methods" :key="method" class="border-l-4 border-gray-200 dark:border-gray-600 pl-4">
+                            <div class="flex items-center gap-3 mb-3"><span :class="['px-3 py-1 text-sm font-bold rounded shadow-sm', getMethodColor(method)]">{{ method.toUpperCase() }}</span><h4 class="font-medium text-gray-900 dark:text-gray-100">{{ operation.summary || operation.operationId || `${method.toUpperCase()} ${path}` }}</h4></div>
+                            <div class="space-y-4 text-sm">
+                              <div class="flex items-center gap-4 text-xs">
+                                <div v-if="operation.operationId"><span class="font-medium text-gray-600 dark:text-gray-400">Operation ID:</span><code class="ml-1 bg-gray-100 dark:bg-gray-700 px-2 py-1 rounded">{{ operation.operationId }}</code></div>
+                                <div v-if="operation.tags && operation.tags.length > 0"><span class="font-medium text-gray-600 dark:text-gray-400">Tags:</span><div class="flex flex-wrap gap-1 mt-1"><span v-for="tag in operation.tags" :key="tag" class="px-2 py-1 bg-emerald-500 text-white dark:bg-emerald-600 dark:text-emerald-100 rounded text-xs font-medium">{{ tag }}</span></div></div>
+                              </div>
+                              <div v-if="operation.description" class="text-gray-600 dark:text-gray-400">{{ operation.description }}</div>
+                              <div v-if="operation.consumes || operation.produces" class="flex items-center gap-4 text-xs">
+                                <div v-if="operation.consumes"><span class="font-medium text-gray-600 dark:text-gray-400">Consumes:</span><span class="ml-1">{{ operation.consumes.join(', ') }}</span></div>
+                                <div v-if="operation.produces"><span class="font-medium text-gray-600 dark:text-gray-400">Produces:</span><span class="ml-1">{{ operation.produces.join(', ') }}</span></div>
+                              </div>
+                              <div v-if="operation.parameters && operation.parameters.length > 0">
+                                <h5 class="font-medium text-gray-700 dark:text-gray-300 mb-2">Parameters</h5>
+                                <div class="space-y-3">
+                                  <div v-for="param in operation.parameters" :key="param.name" class="border border-gray-200 dark:border-gray-600 rounded p-3">
+                                    <div class="flex items-center gap-2 mb-1">
+                                      <span class="font-mono text-gray-900 dark:text-gray-100 font-medium">{{ param.name }}</span>
+                                      <span class="px-2 py-1 bg-cyan-500 text-white dark:bg-cyan-600 dark:text-cyan-100 rounded text-xs font-medium">{{ param.in }}</span>
+                                      <span v-if="param.required" class="px-2 py-1 bg-red-500 text-white dark:bg-red-600 dark:text-red-100 rounded text-xs font-medium">required</span>
+                                      <span v-else class="px-2 py-1 bg-gray-500 text-white dark:bg-gray-600 dark:text-gray-100 rounded text-xs font-medium">optional</span>
+                                      <span v-if="param.schema" class="px-2 py-1 bg-blue-500 text-white dark:bg-blue-600 dark:text-blue-100 rounded text-xs font-medium">{{ formatSchemaType(param.schema) }}</span>
+                                    </div>
+                                    <div v-if="param.description" class="text-gray-600 dark:text-gray-400 text-xs">{{ param.description }}</div>
+                                    <div v-if="param.in === 'body' && param.schema" class="mt-3">
+                                      <div class="bg-gray-50 dark:bg-gray-800 p-3 rounded">
+                                        <div class="text-xs text-gray-500 dark:text-gray-400 mb-2">Request Body Schema:</div>
+                                        <div class="text-sm font-mono text-gray-900 dark:text-gray-100 mb-2">{{ formatSchemaType(param.schema) }}</div>
+                                        <div v-if="param.schema.$ref" class="mb-3"><div class="text-xs text-gray-500 dark:text-gray-400 mb-1">References:</div><code class="text-xs bg-gray-100 dark:bg-gray-700 px-2 py-1 rounded">{{ param.schema.$ref }}</code></div>
+                                        <div class="mb-3"><div class="text-xs text-gray-500 dark:text-gray-400 mb-1">Example Value:</div><pre class="text-xs bg-gray-900 dark:bg-gray-700 text-gray-100 p-3 rounded overflow-auto max-h-48 font-mono">{{ formatExampleValue(param.schema) }}</pre></div>
+                                        <div v-if="param.schema.properties" class="space-y-2"><div class="text-xs text-gray-500 dark:text-gray-400">Properties:</div><div class="space-y-1 pl-2"><div v-for="(prop, propName) in param.schema.properties" :key="propName" class="flex items-center gap-2 text-xs"><span class="font-mono text-gray-700 dark:text-gray-300 font-medium">{{ propName }}</span><span class="px-2 py-1 bg-blue-500 text-white dark:bg-blue-600 dark:text-blue-100 rounded font-medium">{{ formatSchemaType(prop) }}</span><span v-if="prop.description" class="text-gray-500">- {{ prop.description }}</span><span v-if="prop.example" class="text-gray-400">(example: {{ prop.example }})</span><span v-if="prop.default" class="text-gray-400">(default: {{ prop.default }})</span></div></div></div>
+                                        <div v-if="param.schema.additionalProperties" class="mt-2"><div class="text-xs text-gray-500 dark:text-gray-400">Additional Properties:</div><span class="text-xs text-gray-700 dark:text-gray-300">{{ formatSchemaType(param.schema.additionalProperties) }}</span></div>
+                                      </div>
+                                    </div>
+                                    <div v-if="param.in !== 'body' && param.schema && param.schema.properties" class="mt-2"><div class="text-xs text-gray-500 dark:text-gray-400 mb-1">Properties:</div><div class="space-y-1 pl-2"><div v-for="(prop, propName) in param.schema.properties" :key="propName" class="flex items-center gap-2"><span class="font-mono text-gray-700 dark:text-gray-300">{{ propName }}</span><span class="px-2 py-1 bg-blue-500 text-white dark:bg-blue-600 dark:text-blue-100 rounded text-xs font-medium">{{ formatSchemaType(prop) }}</span><span v-if="prop.description" class="text-gray-500">- {{ prop.description }}</span></div></div></div>
+                                  </div>
+                                </div>
+                              </div>
+                              <div v-if="operation.requestBody">
+                                <h5 class="font-medium text-gray-700 dark:text-gray-300 mb-2">Request Body</h5>
+                                <div class="border border-gray-200 dark:border-gray-600 rounded p-3">
+                                  <div v-if="operation.requestBody.required !== undefined" class="mb-2"><span v-if="operation.requestBody.required" class="px-2 py-1 bg-red-500 text-white dark:bg-red-600 dark:text-red-100 rounded text-xs font-medium">required</span><span v-else class="px-2 py-1 bg-gray-500 text-white dark:bg-gray-600 dark:text-gray-100 rounded text-xs font-medium">optional</span></div>
+                                  <div v-if="operation.requestBody.content">
+                                    <div v-for="(content, mediaType) in operation.requestBody.content" :key="mediaType" class="mb-3">
+                                      <div class="text-gray-600 dark:text-gray-400 mb-1 font-medium">{{ mediaType }}</div>
+                                      <div v-if="content.schema" class="bg-gray-50 dark:bg-gray-800 p-3 rounded text-xs font-mono">
+                                        <div class="text-gray-900 dark:text-gray-100 mb-1">{{ formatSchemaType(content.schema) }}</div>
+                                        <div v-if="content.schema.$ref" class="mb-2"><div class="text-xs text-gray-500 dark:text-gray-400 mb-1">References:</div><code class="text-xs bg-gray-100 dark:bg-gray-700 px-2 py-1 rounded">{{ content.schema.$ref }}</code></div>
+                                        <div class="mb-2"><div class="text-xs text-gray-500 dark:text-gray-400 mb-1">Example Value:</div><pre class="text-xs bg-gray-900 dark:bg-gray-700 text-gray-100 p-2 rounded overflow-auto max-h-32 font-mono">{{ formatExampleValue(content.schema) }}</pre></div>
+                                        <div v-if="content.schema.properties" class="space-y-1 pl-2"><div v-for="(prop, propName) in content.schema.properties" :key="propName" class="flex items-center gap-2"><span class="font-mono text-gray-700 dark:text-gray-300">{{ propName }}</span><span class="px-2 py-1 bg-blue-500 text-white dark:bg-blue-600 dark:text-blue-100 rounded text-xs font-medium">{{ formatSchemaType(prop) }}</span><span v-if="prop.description" class="text-gray-500">- {{ prop.description }}</span></div></div>
+                                      </div>
+                                    </div>
+                                  </div>
+                                </div>
+                              </div>
+                              <div v-if="operation.responses">
+                                <h5 class="font-medium text-gray-700 dark:text-gray-300 mb-2">Responses</h5>
+                                <div class="space-y-3">
+                                  <div v-for="(response, statusCode) in operation.responses" :key="statusCode" class="border border-gray-200 dark:border-gray-600 rounded p-3">
+                                    <div class="flex items-center gap-2 mb-2">
+                                      <span :class="['px-2 py-1 rounded font-medium text-xs', statusCode.startsWith('2') ? 'bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200' : statusCode.startsWith('4') ? 'bg-yellow-100 text-yellow-800 dark:bg-yellow-900 dark:text-yellow-200' : statusCode.startsWith('5') ? 'bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200' : 'bg-gray-100 text-gray-800 dark:bg-gray-900 dark:text-gray-200']">{{ statusCode }}</span>
+                                      <span class="text-gray-600 dark:text-gray-400 font-medium">{{ response.description || 'No description' }}</span>
+                                    </div>
+                                    <div v-if="response.content" class="space-y-2"><div v-for="(content, mediaType) in response.content" :key="mediaType"><div class="text-gray-600 dark:text-gray-400 text-xs mb-1">{{ mediaType }}</div><div v-if="content.schema" class="bg-gray-50 dark:bg-gray-800 p-2 rounded text-xs font-mono">{{ formatSchemaType(content.schema) }}</div></div></div>
+                                    <div v-if="response.schema" class="bg-gray-50 dark:bg-gray-800 p-2 rounded text-xs font-mono">{{ formatSchemaType(response.schema) }}</div>
+                                  </div>
+                                </div>
+                              </div>
                             </div>
-                            <!-- Response Editor -->
-                            <div class="w-1/2">
-                              <div class="h-full" :ref="el => setResponseEditorContainer(el, getResultId(data))"></div>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  </template>
+                </Card>
+                <Card v-if="parsedSchema.components || parsedSchema.definitions">
+                  <template #title><div class="flex items-center gap-2"><i class="pi pi-cube text-purple-500"></i>Components & Definitions</div></template>
+                  <template #content>
+                    <div class="space-y-6">
+                      <div v-if="parsedSchema.components?.schemas">
+                        <h4 class="font-medium text-gray-700 dark:text-gray-300 mb-3">Schemas</h4>
+                        <div class="space-y-3">
+                          <div v-for="(schema, name) in parsedSchema.components.schemas" :key="name" class="border border-gray-200 dark:border-gray-700 rounded-lg">
+                            <div class="flex items-center justify-between p-3 bg-gray-50 dark:bg-gray-800 cursor-pointer hover:bg-gray-100 dark:hover:bg-gray-700" @click="toggleComponentExpansion(name)">
+                              <div class="flex items-center gap-3"><i :class="isComponentExpanded(name) ? 'pi pi-chevron-down' : 'pi pi-chevron-right'" class="text-gray-500"></i><span class="font-medium text-gray-900 dark:text-gray-100">{{ name }}</span><span class="px-2 py-1 bg-blue-500 text-white dark:bg-blue-600 dark:text-blue-100 rounded text-xs font-medium">{{ formatSchemaType(schema) }}</span></div>
+                              <div class="flex items-center gap-2 text-xs text-gray-500"><span v-if="schema.properties">{{ Object.keys(schema.properties).length }} properties</span><span v-if="schema.required">{{ schema.required.length }} required</span></div>
+                            </div>
+                            <div v-if="isComponentExpanded(name)" class="p-4 space-y-4">
+                              <div v-if="schema.description" class="text-sm text-gray-600 dark:text-gray-400 bg-gray-50 dark:bg-gray-800 p-3 rounded">{{ schema.description }}</div>
+                              <div class="flex items-center gap-4 text-xs">
+                                <div v-if="schema.type"><span class="font-medium text-gray-600 dark:text-gray-400">Type:</span><span class="ml-1 px-2 py-1 bg-gray-100 dark:bg-gray-700 rounded">{{ schema.type }}</span></div>
+                                <div v-if="schema.format"><span class="font-medium text-gray-600 dark:text-gray-400">Format:</span><span class="ml-1 px-2 py-1 bg-gray-100 dark:bg-gray-700 rounded">{{ schema.format }}</span></div>
+                                <div v-if="schema.example"><span class="font-medium text-gray-600 dark:text-gray-400">Example:</span><code class="ml-1 bg-gray-100 dark:bg-gray-700 px-2 py-1 rounded">{{ schema.example }}</code></div>
+                              </div>
+                              <div v-if="schema.properties" class="space-y-3">
+                                <h5 class="font-medium text-gray-700 dark:text-gray-300">Properties</h5>
+                                <div class="space-y-2">
+                                  <div v-for="(prop, propName) in schema.properties" :key="propName" class="border border-gray-200 dark:border-gray-600 rounded p-3">
+                                    <div class="flex items-center gap-2 mb-1"><span class="font-medium text-gray-900 dark:text-gray-100">{{ propName }}</span><span class="px-2 py-1 bg-blue-500 text-white dark:bg-blue-600 dark:text-blue-100 rounded text-xs font-medium">{{ formatSchemaType(prop) }}</span><span v-if="schema.required && schema.required.includes(propName)" class="px-2 py-1 bg-red-500 text-white dark:bg-red-600 dark:text-red-100 rounded text-xs font-medium">required</span><span v-else class="px-2 py-1 bg-gray-500 text-white dark:bg-gray-600 dark:text-gray-100 rounded text-xs font-medium">optional</span></div>
+                                    <div v-if="prop.description" class="text-sm text-gray-600 dark:text-gray-400 mb-2">{{ prop.description }}</div>
+                                    <div class="flex items-center gap-4 text-xs">
+                                      <div v-if="prop.format"><span class="font-medium text-gray-600 dark:text-gray-400">Format:</span><span class="ml-1 px-2 py-1 bg-gray-100 dark:bg-gray-700 rounded">{{ prop.format }}</span></div>
+                                      <div v-if="prop.example"><span class="font-medium text-gray-600 dark:text-gray-400">Example:</span><code class="ml-1 bg-gray-100 dark:bg-gray-700 px-2 py-1 rounded">{{ prop.example }}</code></div>
+                                      <div v-if="prop.default"><span class="font-medium text-gray-600 dark:text-gray-400">Default:</span><code class="ml-1 bg-gray-100 dark:bg-gray-700 px-2 py-1 rounded">{{ prop.default }}</code></div>
+                                    </div>
+                                    <div v-if="prop.enum" class="mt-2"><div class="text-xs text-gray-500 dark:text-gray-400 mb-1">Enum values:</div><div class="flex flex-wrap gap-1"><span v-for="enumValue in prop.enum" :key="enumValue" class="px-2 py-1 bg-gray-100 dark:bg-gray-700 text-gray-700 dark:text-gray-300 rounded text-xs">{{ enumValue }}</span></div></div>
+                                  </div>
+                                </div>
+                              </div>
+                              <div v-if="schema.required && schema.required.length > 0" class="bg-yellow-50 dark:bg-yellow-900/20 p-3 rounded"><h6 class="font-medium text-yellow-800 dark:text-yellow-200 mb-2">Required Fields</h6><div class="flex flex-wrap gap-2"><span v-for="requiredField in schema.required" :key="requiredField" class="px-2 py-1 bg-yellow-100 text-yellow-800 dark:bg-yellow-900 dark:text-yellow-200 rounded text-xs font-medium">{{ requiredField }}</span></div></div>
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                      <div v-if="parsedSchema.definitions">
+                        <h4 class="font-medium text-gray-700 dark:text-gray-300 mb-3">Definitions</h4>
+                        <div class="space-y-3">
+                          <div v-for="(schema, name) in parsedSchema.definitions" :key="name" class="border border-gray-200 dark:border-gray-700 rounded-lg">
+                            <div class="flex items-center justify-between p-3 bg-gray-50 dark:bg-gray-800 cursor-pointer hover:bg-gray-100 dark:hover:bg-gray-700" @click="toggleComponentExpansion(name)">
+                              <div class="flex items-center gap-3"><i :class="isComponentExpanded(name) ? 'pi pi-chevron-down' : 'pi pi-chevron-right'" class="text-gray-500"></i><span class="font-medium text-gray-900 dark:text-gray-100">{{ name }}</span><span class="px-2 py-1 bg-blue-500 text-white dark:bg-blue-600 dark:text-blue-100 rounded text-xs font-medium">{{ formatSchemaType(schema) }}</span></div>
+                              <div class="flex items-center gap-2 text-xs text-gray-500"><span v-if="schema.properties">{{ Object.keys(schema.properties).length }} properties</span><span v-if="schema.required">{{ schema.required.length }} required</span></div>
+                            </div>
+                            <div v-if="isComponentExpanded(name)" class="p-4 space-y-4">
+                              <div v-if="schema.description" class="text-sm text-gray-600 dark:text-gray-400 bg-gray-50 dark:bg-gray-800 p-3 rounded">{{ schema.description }}</div>
+                              <div class="flex items-center gap-4 text-xs">
+                                <div v-if="schema.type"><span class="font-medium text-gray-600 dark:text-gray-400">Type:</span><span class="ml-1 px-2 py-1 bg-gray-100 dark:bg-gray-700 rounded">{{ schema.type }}</span></div>
+                                <div v-if="schema.format"><span class="font-medium text-gray-600 dark:text-gray-400">Format:</span><span class="ml-1 px-2 py-1 bg-gray-100 dark:bg-gray-700 rounded">{{ schema.format }}</span></div>
+                              </div>
+                              <div v-if="schema.properties" class="space-y-3">
+                                <h5 class="font-medium text-gray-700 dark:text-gray-300">Properties</h5>
+                                <div class="space-y-2">
+                                  <div v-for="(prop, propName) in schema.properties" :key="propName" class="border border-gray-200 dark:border-gray-600 rounded p-3">
+                                    <div class="flex items-center gap-2 mb-1"><span class="font-medium text-gray-900 dark:text-gray-100">{{ propName }}</span><span class="px-2 py-1 bg-blue-500 text-white dark:bg-blue-600 dark:text-blue-100 rounded text-xs font-medium">{{ formatSchemaType(prop) }}</span><span v-if="schema.required && schema.required.includes(propName)" class="px-2 py-1 bg-red-500 text-white dark:bg-red-600 dark:text-red-100 rounded text-xs font-medium">required</span><span v-else class="px-2 py-1 bg-gray-500 text-white dark:bg-gray-600 dark:text-gray-100 rounded text-xs font-medium">optional</span></div>
+                                    <div v-if="prop.description" class="text-sm text-gray-600 dark:text-gray-400 mb-2">{{ prop.description }}</div>
+                                    <div class="flex items-center gap-4 text-xs">
+                                      <div v-if="prop.format"><span class="font-medium text-gray-600 dark:text-gray-400">Format:</span><span class="ml-1 px-2 py-1 bg-gray-100 dark:bg-gray-700 rounded">{{ prop.format }}</span></div>
+                                      <div v-if="prop.example"><span class="font-medium text-gray-600 dark:text-gray-400">Example:</span><code class="ml-1 bg-gray-100 dark:bg-gray-700 px-2 py-1 rounded">{{ prop.example }}</code></div>
+                                      <div v-if="prop.default"><span class="font-medium text-gray-600 dark:text-gray-400">Default:</span><code class="ml-1 bg-gray-100 dark:bg-gray-700 px-2 py-1 rounded">{{ prop.default }}</code></div>
+                                    </div>
+                                    <div v-if="prop.enum" class="mt-2"><div class="text-xs text-gray-500 dark:text-gray-400 mb-1">Enum values:</div><div class="flex flex-wrap gap-1"><span v-for="enumValue in prop.enum" :key="enumValue" class="px-2 py-1 bg-gray-100 dark:bg-gray-700 text-gray-700 dark:text-gray-300 rounded text-xs">{{ enumValue }}</span></div></div>
+                                  </div>
+                                </div>
+                              </div>
+                              <div v-if="schema.required && schema.required.length > 0" class="bg-yellow-50 dark:bg-yellow-900/20 p-3 rounded"><h6 class="font-medium text-yellow-800 dark:text-yellow-200 mb-2">Required Fields</h6><div class="flex flex-wrap gap-2"><span v-for="requiredField in schema.required" :key="requiredField" class="px-2 py-1 bg-yellow-100 text-yellow-800 dark:bg-yellow-900 dark:text-yellow-200 rounded text-xs font-medium">{{ requiredField }}</span></div></div>
                             </div>
                           </div>
                         </div>
@@ -3755,132 +2980,82 @@ onMounted(async () => {
                   </template>
                 </Card>
               </div>
-            </div>
-                     </TabPanel>
-         </TabView>
-        </div>
-       </div>
-
-      <!-- Variables Sidebar -->
-      <div v-if="isSchemaLoaded && (getUniquePathVariables().length > 0 || Object.keys(bodyVariableValues).length > 0)" 
-           :class="[
-             'w-80 bg-white dark:bg-gray-800 border-l border-gray-200 dark:border-gray-700 shadow-lg transition-all duration-300 ease-in-out overflow-y-auto',
-             sidebarOpen ? 'translate-x-0' : 'translate-x-full'
-           ]">
-        <div class="p-4">
-          <div class="mb-4">
-            <h3 class="text-lg font-semibold text-gray-800 dark:text-gray-200">Global Variables</h3>
-          </div>
-          
-                                <!-- Path Variables Section -->
-           <div class="border-t border-gray-200 dark:border-gray-700 pt-4">
-             <div class="mb-3">
-               <h4 class="text-md font-medium text-gray-700 dark:text-gray-300">Path Variables</h4>
-               <p class="text-xs text-gray-500 mt-1">
-                 Add multiple values to test different combinations. Each value will be tested separately.
-               </p>
-             </div>
-            
-                         <div class="space-y-3">
-              
-              <div v-for="variable in getUniquePathVariables()" :key="variable" class="space-y-2">
-                <div class="flex items-center justify-between">
-                  <label class="block text-sm font-medium text-gray-700 dark:text-gray-300">
-                    {{ variable }}
-                  </label>
-                  <Button 
-                    label="Add Value"
-                    icon="pi pi-plus"
-                    @click="addPathVariableValue(variable)"
-                    size="small"
-                    severity="success"
-                    class="text-xs px-2 py-1"
-                  />
+            </TabPanel>
+            <TabPanel header="Results">
+              <div class="space-y-4">
+                <div v-if="!hasResults" class="text-center py-8 text-gray-500"><i class="pi pi-chart-bar text-4xl mb-4"></i><p>No test results yet. Run tests from the Endpoints tab.</p></div>
+                <div v-else>
+                  <Card>
+                    <template #title>
+                      <div class="flex items-center justify-between">
+                        <span>{{ isQueryActive ? 'Filtered Test Results' : 'Test Results' }}<span v-if="isQueryActive" class="text-sm text-gray-500 ml-2">({{ filteredTestResults.length }} of {{ allTestResults.length }})</span></span>
+                        <Button label="Clear All Results" icon="pi pi-trash" @click="clearAllResults" severity="danger" size="small" />
+                      </div>
+                    </template>
+                    <template #content>
+                      <div class="space-y-2">
+                        <div v-for="data in (isQueryActive ? filteredTestResults : allTestResults)" :key="getResultId(data)" class="border border-gray-200 dark:border-gray-700 rounded-lg">
+                          <div class="p-4 hover:bg-gray-50 dark:hover:bg-gray-700 cursor-pointer" @click="toggleResultExpansion(getResultId(data))">
+                            <div class="flex items-center justify-between">
+                              <div class="flex items-center gap-4 flex-1">
+                                <div class="flex-1"><div class="font-medium">{{ data.testCase.name }}</div><div class="text-sm text-gray-500">{{ data.testCase.description }}</div></div>
+                                <span class="px-2 py-1 rounded text-xs font-medium" :class="{'bg-blue-100 text-blue-800': data.testCase.method === 'GET', 'bg-green-100 text-green-800': data.testCase.method === 'POST', 'bg-yellow-100 text-yellow-800': data.testCase.method === 'PUT', 'bg-red-100 text-red-800': data.testCase.method === 'DELETE'}">{{ data.testCase.method }}</span>
+                                <code class="text-sm bg-gray-100 dark:bg-gray-700 text-gray-900 dark:text-gray-100 px-2 py-1 rounded">{{ data.testCase.path }}</code>
+                                <div class="flex items-center gap-2"><span :class="getStatusClass(data.success)">{{ getStatusIcon(data.success) }}</span><span :class="getStatusClass(data.success)">{{ data.status }}</span></div>
+                                <span class="text-sm">{{ formatResponseTime(data.responseTime) }}</span>
+                                <span class="text-sm text-gray-600 dark:text-gray-400">{{ getResponseSize(data.response) }}</span>
+                              </div>
+                              <Button :icon="isResultExpanded(getResultId(data)) ? 'pi pi-chevron-up' : 'pi pi-chevron-down'" size="small" text rounded class="text-gray-500" />
+                            </div>
+                            <div v-if="data.combination && Object.keys(data.combination).length > 0" class="mt-2 text-sm text-gray-600"><span class="font-medium">Variables:</span><span v-for="(value, key) in data.combination" :key="key" class="ml-2">{{ key }} = "{{ value }}"</span></div>
+                          </div>
+                          <div v-if="isResultExpanded(getResultId(data))" class="border-t border-gray-200 dark:border-gray-700 h-[600px]">
+                            <div class="flex h-full">
+                              <div class="w-1/2 border-r border-gray-200 dark:border-gray-700"><div class="h-full" :ref="el => setRequestEditorContainer(el, getResultId(data))"></div></div>
+                              <div class="w-1/2"><div class="h-full" :ref="el => setResponseEditorContainer(el, getResultId(data))"></div></div>
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    </template>
+                  </Card>
                 </div>
-                
+              </div>
+            </TabPanel>
+          </TabView>
+        </div>
+      </div>
+      <div v-if="isSchemaLoaded && (getUniquePathVariables().length > 0 || Object.keys(bodyVariableValues).length > 0)" :class="['w-80 bg-white dark:bg-gray-800 border-l border-gray-200 dark:border-gray-700 shadow-lg transition-all duration-300 ease-in-out overflow-y-auto', sidebarOpen ? 'translate-x-0' : 'translate-x-full']">
+        <div class="p-4">
+          <div class="mb-4"><h3 class="text-lg font-semibold text-gray-800 dark:text-gray-200">Global Variables</h3></div>
+          <div class="border-t border-gray-200 dark:border-gray-700 pt-4">
+            <div class="mb-3"><h4 class="text-md font-medium text-gray-700 dark:text-gray-300">Path Variables</h4><p class="text-xs text-gray-500 mt-1">Add multiple values to test different combinations. Each value will be tested separately.</p></div>
+            <div class="space-y-3">
+              <div v-for="variable in getUniquePathVariables()" :key="variable" class="space-y-2">
+                <div class="flex items-center justify-between"><label class="block text-sm font-medium text-gray-700 dark:text-gray-300">{{ variable }}</label><Button label="Add Value" icon="pi pi-plus" @click="addPathVariableValue(variable)" size="small" severity="success" class="text-xs px-2 py-1" /></div>
                 <div class="space-y-2">
                   <div v-for="(value, index) in getPathVariableValue(variable)" :key="index" class="flex items-center gap-2">
-                    <InputText 
-                      v-model="pathVariableValues[variable][index]"
-                      :placeholder="`Value ${index + 1} for ${variable}`"
-                      class="flex-1"
-                      @paste="handlePathVariablePaste(variable, $event)"
-                    />
-                    <Button 
-                      v-if="getPathVariableValue(variable).length > 1"
-                      label="Remove"
-                      icon="pi pi-trash"
-                      @click="removePathVariableValue(variable, index)"
-                      size="small"
-                      severity="danger"
-                      class="text-xs px-2 py-1"
-                    />
+                    <InputText v-model="pathVariableValues[variable][index]" :placeholder="`Value ${index + 1} for ${variable}`" class="flex-1" @paste="handlePathVariablePaste(variable, $event)" />
+                    <Button v-if="getPathVariableValue(variable).length > 1" label="Remove" icon="pi pi-trash" @click="removePathVariableValue(variable, index)" size="small" severity="danger" class="text-xs px-2 py-1" />
                   </div>
                 </div>
               </div>
             </div>
           </div>
-          
-
-          
-          <!-- Body Variables Section -->
           <div v-if="Object.keys(bodyVariableValues).length > 0" class="border-t border-gray-200 dark:border-gray-700 pt-4 mt-4">
-            <div class="mb-3">
-              <h4 class="text-md font-medium text-gray-700 dark:text-gray-300">Body Variables</h4>
-              <p class="text-xs text-gray-500 mt-1">
-                Customize request body parameters for POST/PUT/PATCH requests.
-              </p>
-            </div>
-            
+            <div class="mb-3"><h4 class="text-md font-medium text-gray-700 dark:text-gray-300">Body Variables</h4><p class="text-xs text-gray-500 mt-1">Customize request body parameters for POST/PUT/PATCH requests.</p></div>
             <div class="space-y-3">
               <div v-for="[key, value] in sortedBodyVariables" :key="key" class="space-y-2">
-                <div class="flex items-center justify-between">
-                  <label class="block text-sm font-medium text-gray-700 dark:text-gray-300">
-                    {{ key }}
-                  </label>
-                  <Button 
-                    label="Add Value"
-                    icon="pi pi-plus"
-                    @click="addBodyVariableValue(key)"
-                    size="small"
-                    severity="success"
-                    class="text-xs px-2 py-1"
-                  />
-                </div>
-                
+                <div class="flex items-center justify-between"><label class="block text-sm font-medium text-gray-700 dark:text-gray-300">{{ key }}</label><Button label="Add Value" icon="pi pi-plus" @click="addBodyVariableValue(key)" size="small" severity="success" class="text-xs px-2 py-1" /></div>
                 <div class="space-y-2">
                   <div v-for="(value, index) in getBodyVariableValue(key)" :key="index" class="flex items-center gap-2">
-                  <InputText 
-                      v-model="bodyVariableValues[key][index]"
-                      :placeholder="`Value ${index + 1} for ${key}`"
-                      class="flex-1"
-                      @paste="handleBodyVariablePaste(key, $event)"
-                    />
-                    <Button 
-                      v-if="getBodyVariableValue(key).length > 1"
-                      label="Remove"
-                      icon="pi pi-trash"
-                      @click="removeBodyVariableValue(key, index)"
-                      size="small"
-                      severity="danger"
-                      class="text-xs px-2 py-1"
-                    />
+                    <InputText v-model="bodyVariableValues[key][index]" :placeholder="`Value ${index + 1} for ${key}`" class="flex-1" @paste="handleBodyVariablePaste(key, $event)" />
+                    <Button v-if="getBodyVariableValue(key).length > 1" label="Remove" icon="pi pi-trash" @click="removeBodyVariableValue(key, index)" size="small" severity="danger" class="text-xs px-2 py-1" />
                   </div>
                 </div>
               </div>
             </div>
           </div>
-          
-          <!-- Debug info 
-          <div class="border-t border-gray-200 dark:border-gray-700 pt-4 mt-4">
-            <div class="mb-3">
-              <h4 class="text-md font-medium text-gray-700 dark:text-gray-300">Debug Info</h4>
-            </div>
-            <div class="text-xs text-gray-500">
-              <p>Body Variables Count: {{ Object.keys(bodyVariableValues).length }}</p>
-              <p>Body Variables: {{ JSON.stringify(bodyVariableValues) }}</p>
-            </div>
-          </div> -->
         </div>
       </div>
     </div>

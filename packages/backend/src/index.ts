@@ -6,6 +6,11 @@ declare global {
   function setTimeout(callback: (...args: any[]) => void, ms: number): number;
 }
 
+// Result type for error handling
+export type Result<T> =
+  | { kind: "Error"; error: string }
+  | { kind: "Ok"; value: T };
+
 interface OpenAPISchema {
   openapi?: string;
   swagger?: string;
@@ -1113,6 +1118,167 @@ async function sendResultToReplay(
   }
 }
 
+// Database helper functions
+const saveSessionsToDb = async (sdk: SDK, projectId: string, sessions: any[]): Promise<Result<void>> => {
+  try {
+    const db = await sdk.meta.db();
+    const value = JSON.stringify(sessions);
+    const key = `openapi-sessions-${projectId}`;
+    const stmt = await db.prepare(`
+      INSERT OR REPLACE INTO config (key, value) 
+      VALUES (?, ?)
+    `);
+    await stmt.run(key, value);
+    return { kind: "Ok", value: undefined };
+  } catch (error) {
+    return {
+      kind: "Error",
+      error: `Failed to save sessions: ${error instanceof Error ? error.message : String(error)}`,
+    };
+  }
+};
+
+const loadSessionsFromDb = async (sdk: SDK, projectId: string): Promise<Result<any[]>> => {
+  try {
+    const db = await sdk.meta.db();
+    const key = `openapi-sessions-${projectId}`;
+    const stmt = await db.prepare(`SELECT value FROM config WHERE key = ?`);
+    const result = await stmt.get<{ value: string }>(key);
+    
+    if (result === undefined || result.value === undefined) {
+      return { kind: "Ok", value: [] };
+    }
+    const sessions = JSON.parse(result.value) as any[];
+    return { kind: "Ok", value: sessions };
+  } catch (error) {
+    return {
+      kind: "Error",
+      error: `Failed to load sessions: ${error instanceof Error ? error.message : String(error)}`,
+    };
+  }
+};
+
+const saveTestResultsToDb = async (sdk: SDK, testResults: any): Promise<Result<void>> => {
+  try {
+    const db = await sdk.meta.db();
+    const value = JSON.stringify(testResults);
+    const key = 'openapi-testing-results';
+    const stmt = await db.prepare(`
+      INSERT OR REPLACE INTO config (key, value) 
+      VALUES (?, ?)
+    `);
+    await stmt.run(key, value);
+    return { kind: "Ok", value: undefined };
+  } catch (error) {
+    return {
+      kind: "Error",
+      error: `Failed to save test results: ${error instanceof Error ? error.message : String(error)}`,
+    };
+  }
+};
+
+const loadTestResultsFromDb = async (sdk: SDK): Promise<Result<any>> => {
+  try {
+    const db = await sdk.meta.db();
+    const key = 'openapi-testing-results';
+    const stmt = await db.prepare(`SELECT value FROM config WHERE key = ?`);
+    const result = await stmt.get<{ value: string }>(key);
+    
+    if (result === undefined || result.value === undefined) {
+      return { kind: "Ok", value: null };
+    }
+    const testResults = JSON.parse(result.value) as any;
+    return { kind: "Ok", value: testResults };
+  } catch (error) {
+    return {
+      kind: "Error",
+      error: `Failed to load test results: ${error instanceof Error ? error.message : String(error)}`,
+    };
+  }
+};
+
+// Log all database contents
+const logDatabaseContents = async (sdk: SDK): Promise<Result<void>> => {
+  try {
+    const db = await sdk.meta.db();
+    const stmt = await db.prepare(`SELECT key, value FROM config`);
+    const allRows = await stmt.all<{ key: string; value: string }>();
+    
+    sdk.console.log('=== Database Contents ===');
+    sdk.console.log(`Total entries: ${allRows.length}`);
+    
+    for (const row of allRows) {
+      try {
+        const parsedValue = JSON.parse(row.value);
+        sdk.console.log(`Key: ${row.key}`);
+        sdk.console.log(`Value:`, parsedValue);
+        sdk.console.log('---');
+      } catch (parseError) {
+        sdk.console.log(`Key: ${row.key}`);
+        sdk.console.log(`Value (raw): ${row.value}`);
+        sdk.console.log('---');
+      }
+    }
+    
+    sdk.console.log('=== End Database Contents ===');
+    return { kind: "Ok", value: undefined };
+  } catch (error) {
+    sdk.console.error(`Failed to log database contents: ${error instanceof Error ? error.message : String(error)}`);
+    return {
+      kind: "Error",
+      error: `Failed to log database contents: ${error instanceof Error ? error.message : String(error)}`,
+    };
+  }
+};
+
+// Migrate data from localStorage to database
+const migrateFromLocalStorage = async (sdk: SDK, localStorageData: { sessions: Record<string, any[]>, testResults: any }): Promise<Result<{ sessionsMigrated: number; testResultsMigrated: boolean }>> => {
+  try {
+    let sessionsMigrated = 0;
+    let testResultsMigrated = false;
+    
+    // Migrate sessions (using the openapi env var value as the project key)
+    for (const [key, sessions] of Object.entries(localStorageData.sessions)) {
+      // Extract project key from key (format: openapi-sessions-{openapiValue})
+      // The key is already the openapi environment variable value
+      const projectKey = key.replace('openapi-sessions-', '');
+      if (projectKey && Array.isArray(sessions) && sessions.length > 0) {
+        sdk.console.log(`Migrating ${sessions.length} sessions for project key: ${projectKey}`);
+        
+        const result = await saveSessionsToDb(sdk, projectKey, sessions);
+        if (result.kind === "Ok") {
+          sessionsMigrated += sessions.length;
+          sdk.console.log(`✓ Migrated ${sessions.length} sessions for project: ${projectKey}`);
+        } else {
+          sdk.console.error(`✗ Failed to migrate sessions for ${projectKey}: ${result.error}`);
+        }
+      }
+    }
+    
+    // Migrate test results
+    if (localStorageData.testResults) {
+      const result = await saveTestResultsToDb(sdk, localStorageData.testResults);
+      if (result.kind === "Ok") {
+        testResultsMigrated = true;
+        sdk.console.log('Migrated test results');
+      } else {
+        sdk.console.error(`Failed to migrate test results: ${result.error}`);
+      }
+    }
+    
+    sdk.console.log(`Migration complete: ${sessionsMigrated} sessions migrated, test results: ${testResultsMigrated ? 'yes' : 'no'}`);
+    
+    return { 
+      kind: "Ok", 
+      value: { sessionsMigrated, testResultsMigrated } 
+    };
+  } catch (error) {
+    return {
+      kind: "Error",
+      error: `Failed to migrate from localStorage: ${error instanceof Error ? error.message : String(error)}`,
+    };
+  }
+};
 
 export type API = DefineAPI<{
   parseOpenAPISchema: typeof parseOpenAPISchema;
@@ -1127,9 +1293,30 @@ export type API = DefineAPI<{
   openTestResultInCaido: typeof openTestResultInCaido;
   sendResultToReplay: typeof sendResultToReplay;
   setEnvironmentVariable: typeof setEnvironmentVariable;
+  saveSessionsToDb: typeof saveSessionsToDb;
+  loadSessionsFromDb: typeof loadSessionsFromDb;
+  saveTestResultsToDb: typeof saveTestResultsToDb;
+  loadTestResultsFromDb: typeof loadTestResultsFromDb;
+  logDatabaseContents: typeof logDatabaseContents;
+  migrateFromLocalStorage: typeof migrateFromLocalStorage;
 }>;
 
 export function init(sdk: SDK<API>) {
+  // Initialize database table
+  (async () => {
+    try {
+      const db = await sdk.meta.db();
+      await db.exec(`
+        CREATE TABLE IF NOT EXISTS config (
+          key TEXT PRIMARY KEY,
+          value TEXT NOT NULL
+        )
+      `);
+    } catch (error) {
+      console.error('Failed to initialize database:', error);
+    }
+  })();
+
   sdk.api.register("parseOpenAPISchema", parseOpenAPISchema);
   sdk.api.register("generateTestCases", generateTestCases);
   sdk.api.register("executeTest", executeTest);
@@ -1142,6 +1329,12 @@ export function init(sdk: SDK<API>) {
   sdk.api.register("openTestResultInCaido", openTestResultInCaido);
   sdk.api.register("sendResultToReplay", sendResultToReplay);
   sdk.api.register("setEnvironmentVariable", setEnvironmentVariable);
+  sdk.api.register("saveSessionsToDb", saveSessionsToDb);
+  sdk.api.register("loadSessionsFromDb", loadSessionsFromDb);
+  sdk.api.register("saveTestResultsToDb", saveTestResultsToDb);
+  sdk.api.register("loadTestResultsFromDb", loadTestResultsFromDb);
+  sdk.api.register("logDatabaseContents", logDatabaseContents);
+  sdk.api.register("migrateFromLocalStorage", migrateFromLocalStorage);
 }
 
 // Set environment variable using backend SDK
