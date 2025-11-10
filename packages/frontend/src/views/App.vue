@@ -26,6 +26,15 @@ import SettingsTab from "@/components/SettingsTab.vue";
 
 const sdk = useSDK();
 
+//###################################
+// Constants
+//###################################
+const DEFAULT_BASE_URL = "https://localhost";
+
+//###################################
+// Utility Functions
+//###################################
+
 // GitHub star button function
 const openGitHubInBrowser = () => {
   try {
@@ -43,13 +52,17 @@ const openGitHubInBrowser = () => {
 };
 
 
+//###################################
+// Project Key Management
+//###################################
+
 // Get project key - check openapi env var first, then use project ID as fallback
 const getProjectKey = async (projectId?: string): Promise<string> => {
   // FIRST: Check if openapi environment variable is available
   try {
     const openapiValue = await sdk.env.getVar('openapi');
     if (openapiValue) {
-      console.log(`Found 'openapi' env var: ${openapiValue}`);
+      //console.log(`Found 'openapi' env var: ${openapiValue}`);
       return openapiValue;
     }
   } catch (error) {
@@ -58,15 +71,19 @@ const getProjectKey = async (projectId?: string): Promise<string> => {
   
   // SECOND: If no openapi env var, use project ID if provided
   if (projectId) {
-    console.log(`No 'openapi' env var found, using project ID as key: ${projectId}`);
+    //console.log(`No 'openapi' env var found, using project ID as key: ${projectId}`);
     return projectId;
   }
   
   // THIRD: Fallback to 'default' if no project ID available
-  console.log(`No 'openapi' env var and no project ID, using 'default' key`);
+  //console.log(`No 'openapi' env var and no project ID, using 'default' key`);
   return 'default';
 };
 
+
+//###################################
+// Type Definitions
+//###################################
 
 // Session management
 interface OpenAPISession {
@@ -96,6 +113,10 @@ interface OpenAPISession {
   lastModified: string;
 }
 
+//###################################
+// State/Reactive Variables
+//###################################
+
 // Session state
 const sessions = ref<OpenAPISession[]>([]);
 const currentSessionId = ref<string | null>(null);
@@ -114,7 +135,7 @@ const defaultPlaceholders = ref({
   integer: 0,
   number: 0,
   boolean: true,
-  email: 'user@example.com',
+  email: 'user@wearehackerone.com',
   date: '2023-01-01',
   dateTime: '2023-01-01T00:00:00Z',
   uuid: '123e4567-e89b-12d3-a456-426614174000'
@@ -123,11 +144,12 @@ const showSettingsDialog = ref(false);
 
 // Reactive state (now session-specific)
 const schemaText = ref("");
-const baseUrl = ref("https://google.com");
+const baseUrl = ref(DEFAULT_BASE_URL);
 const useRandomValues = ref(false);
 const useParameterFromDefinition = ref(true); // Default to true to use example values
 const isLoading = ref(false);
 const validationResult = ref<{ valid: boolean; errors: string[] } | null>(null);
+const testErrorMessage = ref<string | null>(null);
 const testResults = ref<any[]>([]);
 const activeTab = ref(0);
 const testCases = ref<any[]>([]);
@@ -166,6 +188,10 @@ const expandedPaths = ref<Set<string>>(new Set());
 const expandedComponents = ref<Set<string>>(new Set());
 
 
+//###################################
+// Schema Loading and Validation
+//###################################
+
 // Validate schema locally
 const validateSchema = async () => {
   try {
@@ -184,6 +210,10 @@ const validateSchema = async () => {
   }
 };
 
+//###################################
+// Session Management Functions
+//###################################
+
 // Session management functions
 const createNewSession = (): OpenAPISession => {
   const sessionId = `session-${Date.now()}`;
@@ -200,7 +230,7 @@ const createNewSession = (): OpenAPISession => {
     id: sessionId,
     name: sessionName,
     schemaText: "",
-    baseUrl: "http://localhost:3000",
+    baseUrl: DEFAULT_BASE_URL,
     useRandomValues: false,
     useParameterFromDefinition: true,
     testResults: [],
@@ -260,8 +290,8 @@ const saveCurrentSession = async () => {
 
 const loadSession = async (sessionId: string) => {
   try {
-    console.log(`loadSession called with sessionId: ${sessionId}`);
-    console.log(`Available sessions: ${sessions.value.length}`, sessions.value.map(s => ({ id: s.id, name: s.name })));
+    //console.log(`loadSession called with sessionId: ${sessionId}`);
+    //console.log(`Available sessions: ${sessions.value.length}`, sessions.value.map(s => ({ id: s.id, name: s.name })));
     
     const session = sessions.value.find(s => s.id === sessionId);
     if (!session) {
@@ -273,8 +303,8 @@ const loadSession = async (sessionId: string) => {
       return;
     }
     
-    console.log(`Loading session: ${session.name} (${session.id})`);
-    console.log(`Session data:`, {
+    //console.log(`Loading session: ${session.name} (${session.id})`);
+   /* console.log(`Session data:`, {
       hasSchemaText: !!session.schemaText,
       schemaTextLength: session.schemaText?.length || 0,
       hasTestCases: !!session.testCases,
@@ -282,7 +312,7 @@ const loadSession = async (sessionId: string) => {
       hasTestResults: !!session.testResults,
       testResultsCount: Array.isArray(session.testResults) ? session.testResults.length : 0,
       isSchemaLoaded: session.isSchemaLoaded
-    });
+    });*/
     
     // Save current session before switching (only if switching to a different session)
     if (currentSessionId.value && currentSessionId.value !== sessionId) {
@@ -327,32 +357,32 @@ const loadSession = async (sessionId: string) => {
       isSchemaLoaded.value = false;
     }
     
-    console.log(`Loaded session data:`, {
+    /*console.log(`Loaded session data:`, {
       schemaTextLength: schemaText.value.length,
       testCasesCount: testCases.value.length,
       testResultsCount: testResults.value.length,
       isSchemaLoaded: isSchemaLoaded.value
-    });
+    });*/
     
     // Re-parse schema if it was loaded in this session
     if (session.isSchemaLoaded && schemaText.value) {
       try {
-        console.log('Re-parsing schema...');
+        //console.log('Re-parsing schema...');
         const schema = parseOpenAPISchemaLocally(schemaText.value);
         parsedSchema.value = schema;
-        console.log('Schema parsed successfully');
+        //console.log('Schema parsed successfully');
       } catch (error) {
         console.error('Failed to re-parse schema when loading session:', error);
         parsedSchema.value = null;
         isSchemaLoaded.value = false;
       }
     } else {
-      console.log('Skipping schema re-parse (isSchemaLoaded:', session.isSchemaLoaded, ', schemaText length:', schemaText.value.length, ')');
+      //console.log('Skipping schema re-parse (isSchemaLoaded:', session.isSchemaLoaded, ', schemaText length:', schemaText.value.length, ')');
       parsedSchema.value = null;
     }
     
     currentSessionId.value = sessionId;
-    console.log(`Session ${sessionId} loaded successfully. Current session ID: ${currentSessionId.value}`);
+    //console.log(`Session ${sessionId} loaded successfully. Current session ID: ${currentSessionId.value}`);
   } catch (error) {
     console.error('Critical error in loadSession:', error);
     // Ensure we always have a valid session ID to prevent UI from breaking
@@ -442,18 +472,18 @@ const saveSessionsToStorage = async () => {
     try {
       const openapiValue = await sdk.env.getVar('openapi');
       if (openapiValue) {
-        console.log(`Found 'openapi' env var for saving: ${openapiValue}`);
+        //console.log(`Found 'openapi' env var for saving: ${openapiValue}`);
         projectKey = openapiValue;
         currentProjectId.value = projectKey; // Update currentProjectId to match
       } else {
         // If no env var, use currentProjectId (which should be project ID) as fallback
         if (currentProjectId.value && currentProjectId.value !== 'default') {
           projectKey = currentProjectId.value;
-          console.log(`No 'openapi' env var found, using currentProjectId as key: ${currentProjectId.value}`);
+          //console.log(`No 'openapi' env var found, using currentProjectId as key: ${currentProjectId.value}`);
         } else {
           // Last resort: use 'default' if currentProjectId is not set or is 'default'
           projectKey = 'default';
-          console.log(`No 'openapi' env var and no valid currentProjectId, using 'default' key`);
+          //console.log(`No 'openapi' env var and no valid currentProjectId, using 'default' key`);
         }
       }
     } catch (error) {
@@ -461,10 +491,10 @@ const saveSessionsToStorage = async () => {
       // Fall back to currentProjectId if available
       if (currentProjectId.value && currentProjectId.value !== 'default') {
         projectKey = currentProjectId.value;
-        console.log(`Using currentProjectId as fallback: ${currentProjectId.value}`);
+        //console.log(`Using currentProjectId as fallback: ${currentProjectId.value}`);
       } else {
         projectKey = 'default';
-        console.log(`Using 'default' as fallback`);
+        //console.log(`Using 'default' as fallback`);
       }
     }
     
@@ -493,7 +523,7 @@ const saveSessionsToStorage = async () => {
     });
     
     // const storageKey = `openapi-sessions-${projectKey}`;
-    console.log(`Saving sessions for project key: ${projectKey}`);
+    //console.log(`Saving sessions for project key: ${projectKey}`);
     
     // Save to Caido database
     try {
@@ -501,30 +531,13 @@ const saveSessionsToStorage = async () => {
       if (result.kind === "Error") {
         console.error('Failed to save sessions to database:', result.error);
       } else {
-        // Log database contents after save
-        await sdk.backend.logDatabaseContents();
+        // Log database contents after save (debug function)
+        // await sdk.backend.logDatabaseContents();
       }
     } catch (dbError) {
       console.error('Database save failed:', dbError);
     }
     
-    // Keep localStorage code for later migration (commented out but preserved)
-    // TODO: Remove localStorage code after migration button is implemented
-    /*
-    // Try Caido storage first, then always save to localStorage as backup
-    try {
-      await sdk.storage.set(storageKey, sessionsData);
-    } catch (storageError) {
-      console.warn('Caido storage failed:', storageError);
-    }
-    
-    // Always save to localStorage as backup
-    try {
-      localStorage.setItem(storageKey, JSON.stringify(sessionsData));
-    } catch (localStorageError) {
-      console.error('localStorage save failed:', localStorageError);
-    }
-    */
   } catch (error) {
     console.error('Failed to save sessions:', error);
   }
@@ -537,18 +550,18 @@ const loadSessionsFromStorage = async () => {
     try {
       const openapiValue = await sdk.env.getVar('openapi');
       if (openapiValue) {
-        console.log(`Found 'openapi' env var for loading: ${openapiValue}`);
+        //console.log(`Found 'openapi' env var for loading: ${openapiValue}`);
         projectKey = openapiValue;
         currentProjectId.value = projectKey; // Update currentProjectId to match
       } else {
         // If no env var, use currentProjectId (which should be project ID) as fallback
         if (currentProjectId.value && currentProjectId.value !== 'default') {
           projectKey = currentProjectId.value;
-          console.log(`No 'openapi' env var found, using currentProjectId as key: ${currentProjectId.value}`);
+          //console.log(`No 'openapi' env var found, using currentProjectId as key: ${currentProjectId.value}`);
         } else {
           // Last resort: use 'default' if currentProjectId is not set or is 'default'
           projectKey = 'default';
-          console.log(`No 'openapi' env var and no valid currentProjectId, using 'default' key`);
+          //console.log(`No 'openapi' env var and no valid currentProjectId, using 'default' key`);
         }
       }
     } catch (error) {
@@ -556,15 +569,15 @@ const loadSessionsFromStorage = async () => {
       // Fall back to currentProjectId if available
       if (currentProjectId.value && currentProjectId.value !== 'default') {
         projectKey = currentProjectId.value;
-        console.log(`Using currentProjectId as fallback: ${currentProjectId.value}`);
+        //console.log(`Using currentProjectId as fallback: ${currentProjectId.value}`);
       } else {
         projectKey = 'default';
-        console.log(`Using 'default' as fallback`);
+        //console.log(`Using 'default' as fallback`);
       }
     }
     
     const storageKey = `openapi-sessions-${projectKey}`;
-    console.log(`Loading sessions for project key: ${projectKey}`);
+    //console.log(`Loading sessions for project key: ${projectKey}`);
     
     let sessionsData = null;
     
@@ -573,7 +586,7 @@ const loadSessionsFromStorage = async () => {
       const result = await sdk.backend.loadSessionsFromDb(projectKey);
       if (result.kind === "Ok") {
         sessionsData = result.value;
-        console.log(`Loaded ${sessionsData ? (Array.isArray(sessionsData) ? sessionsData.length : 'non-array') : 'null'} sessions from database for project key: ${projectKey}`);
+        //console.log(`Loaded ${sessionsData ? (Array.isArray(sessionsData) ? sessionsData.length : 'non-array') : 'null'} sessions from database for project key: ${projectKey}`);
       } else {
         console.warn('Failed to load sessions from database:', result.error);
       }
@@ -584,19 +597,19 @@ const loadSessionsFromStorage = async () => {
     // If no sessions found with primary project key, try to find sessions in other project keys
     if ((!sessionsData || !Array.isArray(sessionsData) || sessionsData.length === 0) && sdk.backend.getAllSessionProjectKeys) {
       try {
-        console.log('No sessions found with primary project key, searching for sessions in other project keys...');
+        //console.log('No sessions found with primary project key, searching for sessions in other project keys...');
         const allKeysResult = await sdk.backend.getAllSessionProjectKeys();
         if (allKeysResult.kind === "Ok" && allKeysResult.value && allKeysResult.value.length > 0) {
-          console.log(`Found ${allKeysResult.value.length} project keys with sessions:`, allKeysResult.value);
+          //console.log(`Found ${allKeysResult.value.length} project keys with sessions:`, allKeysResult.value);
           
           // Try loading from each project key until we find sessions
           for (const otherProjectKey of allKeysResult.value) {
             if (otherProjectKey === projectKey) continue; // Already tried this one
             
-            console.log(`Trying to load sessions from project key: ${otherProjectKey}`);
+            //console.log(`Trying to load sessions from project key: ${otherProjectKey}`);
             const otherResult = await sdk.backend.loadSessionsFromDb(otherProjectKey);
             if (otherResult.kind === "Ok" && otherResult.value && Array.isArray(otherResult.value) && otherResult.value.length > 0) {
-              console.log(`Found ${otherResult.value.length} sessions in project key: ${otherProjectKey}`);
+              //console.log(`Found ${otherResult.value.length} sessions in project key: ${otherProjectKey}`);
               sessionsData = otherResult.value;
               // Update currentProjectId to match the project key where we found sessions
               currentProjectId.value = otherProjectKey;
@@ -629,14 +642,14 @@ const loadSessionsFromStorage = async () => {
     }
     
     if (sessionsData && Array.isArray(sessionsData)) {
-      console.log(`Processing ${sessionsData.length} sessions...`);
-      console.log('First session sample:', sessionsData[0] ? {
+      //console.log(`Processing ${sessionsData.length} sessions...`);
+      /*console.log('First session sample:', sessionsData[0] ? {
         id: sessionsData[0].id,
         name: sessionsData[0].name,
         hasSchemaText: !!sessionsData[0].schemaText,
         hasTestCases: !!sessionsData[0].testCases,
         hasTestResults: !!sessionsData[0].testResults
-      } : 'No sessions');
+      } : 'No sessions');*/
       
       try {
         sessions.value = sessionsData.map(session => {
@@ -657,7 +670,7 @@ const loadSessionsFromStorage = async () => {
           }
         });
         
-        console.log(`Mapped ${sessions.value.length} sessions to reactive state`);
+        //console.log(`Mapped ${sessions.value.length} sessions to reactive state`);
         
         // Initialize session counter for this project based on existing sessions
         if (sessions.value.length > 0) {
@@ -672,18 +685,18 @@ const loadSessionsFromStorage = async () => {
             sessionCounter.value[currentProjectId.value] = sessions.value.length + 1;
           }
           
-          console.log(`Loading first session: ${sessions.value[0].id} (${sessions.value[0].name})`);
+          //console.log(`Loading first session: ${sessions.value[0].id} (${sessions.value[0].name})`);
           // Load the first session with error handling
           try {
             await loadSession(sessions.value[0].id);
-            console.log('Session loaded successfully');
+            //console.log('Session loaded successfully');
           } catch (loadError) {
             console.error('Error loading session:', loadError);
             // Even if loading fails, ensure we have a valid state
             currentSessionId.value = sessions.value[0].id;
           }
         } else {
-          console.log('Sessions array is empty, creating new session');
+          //console.log('Sessions array is empty, creating new session');
           // No sessions found, create a new one
           sessionCounter.value[currentProjectId.value] = 1;
           const newSession = createNewSession();
@@ -708,7 +721,7 @@ const loadSessionsFromStorage = async () => {
         }
       }
     } else {
-      console.log(`No valid sessions data found. Type: ${typeof sessionsData}, IsArray: ${Array.isArray(sessionsData)}`);
+      //console.log(`No valid sessions data found. Type: ${typeof sessionsData}, IsArray: ${Array.isArray(sessionsData)}`);
       // No sessions found, create a new one
       sessionCounter.value[currentProjectId.value] = 1;
       const newSession = createNewSession();
@@ -725,7 +738,10 @@ const loadSessionsFromStorage = async () => {
 };
 
 
-// Computed properties
+//###################################
+// Computed Properties
+//###################################
+
 const hasResults = computed(() => {
   return testResults.value.length > 0 || testCases.value.some(tc => tc.result);
 });
@@ -768,6 +784,10 @@ const sortedBodyVariables = computed(() => {
   const entries = Object.entries(bodyVariableValues.value);
   return entries.sort(([keyA], [keyB]) => keyA.localeCompare(keyB));
 });
+
+//###################################
+// Schema Parsing and Decoding Functions
+//###################################
 
 // Frontend schema parsing and test case generation functions to avoid RPC payload size issues
 const parseOpenAPISchemaLocally = (schemaText: string): any => {
@@ -930,6 +950,7 @@ const generateTestCasesLocally = (schema: any): any[] => {
 };
 
 // Frontend schema validation function
+// Keep decoding in frontend to avoid RPC payload size issues
 const validateSchemaLocally = (schemaText: string): { valid: boolean; errors: string[] } => {
   const errors: string[] = [];
   
@@ -968,6 +989,10 @@ const validateSchemaLocally = (schemaText: string): { valid: boolean; errors: st
     };
   }
 };
+
+//###################################
+// Raw Endpoint Functions
+//###################################
 
 // Parse raw endpoint line
 const parseRawEndpoint = (line: string): { method: string | null; path: string } | null => {
@@ -1263,7 +1288,7 @@ const attachRequestContextMenu = (container: HTMLElement, testResult: any) => {
   }
 };
 
-
+//TD
 const toMinimalTestCase = (tc: any) => ({
   path: tc.path,
   method: tc.method,
@@ -1276,8 +1301,33 @@ const toMinimalTestCase = (tc: any) => ({
   originalPath: tc.originalPath || tc.path
 });
 
+//###################################
+// Test Execution Functions
+//###################################
+
 const runAllTests = async () => {
-  if (!schemaText.value.trim() || !baseUrl.value.trim()) {
+  // Clear any previous error message
+  testErrorMessage.value = null;
+  
+  if (!baseUrl.value.trim()) {
+    testErrorMessage.value = 'Base URL is required to run tests';
+    return;
+  }
+
+  // Check if there are any raw endpoints without methods
+  if (isRawMode.value) {
+    const rawEndpointsWithoutMethod = testCases.value.filter((tc: any) => 
+      tc.isRaw && (!tc.method || tc.method === null)
+    );
+    
+    if (rawEndpointsWithoutMethod.length > 0) {
+      testErrorMessage.value = `Cannot test all endpoints: ${rawEndpointsWithoutMethod.length} raw endpoint(s) without a method found. Please specify a method in the format: [METHOD] /path`;
+      return;
+    }
+  }
+
+  if (!schemaText.value.trim() && !isRawMode.value) {
+    testErrorMessage.value = 'No schema or raw endpoints loaded';
     return;
   }
 
@@ -1295,12 +1345,18 @@ const runAllTests = async () => {
       useParameterFromDefinition: useParameterFromDefinition.value
     };
     
-    // Get all test cases locally to avoid RPC payload size issues
-    const schema = parseOpenAPISchemaLocally(schemaText.value);
-    const testCases = generateTestCasesLocally(schema);
-    
-    // Use filtered test cases if search is active
-    const testCasesToRun = endpointSearchQuery.value.trim() ? displayTestCases.value : testCases;
+    // Get all test cases - use raw endpoints if in raw mode, otherwise parse schema
+    let testCasesToRun: any[];
+    if (isRawMode.value) {
+      // In raw mode, use the test cases directly
+      testCasesToRun = endpointSearchQuery.value.trim() ? displayTestCases.value : testCases.value;
+    } else {
+      // Get all test cases locally to avoid RPC payload size issues
+      const schema = parseOpenAPISchemaLocally(schemaText.value);
+      const testCases = generateTestCasesLocally(schema);
+      // Use filtered test cases if search is active
+      testCasesToRun = endpointSearchQuery.value.trim() ? displayTestCases.value : testCases;
+    }
     
     // Process each test case individually to show incremental results
     for (const testCase of testCasesToRun) {
@@ -1449,12 +1505,16 @@ const runSingleTest = async (testCase: any) => {
 };
 
 const runAllMethods = async (testCase: any) => {
+  // Clear any previous error message
+  testErrorMessage.value = null;
+  
   if (!baseUrl.value.trim()) {
+    testErrorMessage.value = 'Base URL is required to run tests';
     return;
   }
 
   // Define all HTTP methods to test
-  // "All Methods" should test all methods on the selected endpoint, even if no method is specified
+  // TODO let user add is own method like foo
   const allMethods = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS', 'CONNECT', 'TRACE'];
   
   // Filter out DELETE if not allowed
@@ -1488,10 +1548,11 @@ const runAllMethods = async (testCase: any) => {
       const originalTestCaseId = getTestCaseId(testCase);
       const methodTestCase = {
         ...testCase,
-        method: method,
+        method: method, // Set the method for this test (even if original was null)
         name: `${method} ${testCase.path} [${originalTestCaseId}]`,
-        originalMethod: testCase.method, // Keep original for reference
-        originalTestCaseId: originalTestCaseId // Track which test case triggered this
+        originalMethod: testCase.method, // Keep original for reference (can be null for raw endpoints)
+        originalTestCaseId: originalTestCaseId, // Track which test case triggered this
+        isRaw: testCase.isRaw || false // Explicitly preserve isRaw flag
       };
 
       // Get body and query variables from the ORIGINAL test case (current endpoint's values)
@@ -1657,6 +1718,10 @@ const updateTestCaseResult = (testCase: any, result: any, combination?: Record<s
     testCases.value[index].result = result;
   }
 };
+
+//###################################
+// UI/Display Helper Functions
+//###################################
 
 const getStatusIcon = (success: boolean) => {
   return success ? "" : "";
@@ -2476,6 +2541,7 @@ const toggleComponentExpansion = (componentName: string) => {
   }
 };
 
+//todo mb unexpand on leaving to avoid refresh manually
 const isPathExpanded = (path: string) => {
   return expandedPaths.value.has(path);
 };
@@ -2547,9 +2613,6 @@ const formatSchemaType = (schema: any) => {
   return 'object';
 };
 
-
-
-
 // Format example value as JSON string
 const formatExampleValue = (schema: any): string => {
   try {
@@ -2561,6 +2624,10 @@ const formatExampleValue = (schema: any): string => {
 };
 
 // Watch for expanded results to create native Caido editors
+//###################################
+// Watchers and Lifecycle Hooks
+//###################################
+
 watch(expandedResults, (newExpanded) => {
   
   // Clear all container contents to ensure clean state
@@ -2576,9 +2643,7 @@ watch(expandedResults, (newExpanded) => {
     const expandedId = Array.from(newExpanded)[0];
     
     // Find the test result in all available arrays
-    
-
-    
+    //Even like that not fix try fix it for .9
     // Try to find the result in allTestResults, testResults, and filteredTestResults
     let testResult = allTestResults.value.find(result => getResultId(result) === expandedId);
     if (!testResult) {
@@ -2694,8 +2759,8 @@ const saveResultsToStorage = async () => {
       if (result.kind === "Error") {
         console.error('Failed to save test results to database:', result.error);
       } else {
-        // Log database contents after save
-        await sdk.backend.logDatabaseContents();
+        // Log database contents after save (debug function)
+        // await sdk.backend.logDatabaseContents();
       }
     } catch (dbError) {
       console.error('Database save failed:', dbError);
@@ -2774,7 +2839,7 @@ onMounted(async () => {
   // Handle project change
   const handleProjectChange = async (event: { projectId: string | undefined }) => {
     try {
-      console.log('Project change event received, projectId:', event.projectId);
+      //console.log('Project change event received, projectId:', event.projectId);
       
       // FIRST: Check if openapi environment variable is available for the new project
       // If not available, use project ID from the event as the session key
@@ -2782,17 +2847,17 @@ onMounted(async () => {
       try {
         const openapiValue = await sdk.env.getVar('openapi');
         if (openapiValue) {
-          console.log(`Found 'openapi' env var for new project: ${openapiValue}`);
+          //console.log(`Found 'openapi' env var for new project: ${openapiValue}`);
           newProjectKey = openapiValue;
         } else {
           // If no env var, use project ID from event as fallback
           if (event.projectId) {
             newProjectKey = event.projectId;
-            console.log(`No 'openapi' env var found, using project ID as key: ${event.projectId}`);
+            //console.log(`No 'openapi' env var found, using project ID as key: ${event.projectId}`);
           } else {
             // Last resort: use 'default' if no project ID available
             newProjectKey = 'default';
-            console.log(`No 'openapi' env var and no project ID, using 'default' key`);
+            //console.log(`No 'openapi' env var and no project ID, using 'default' key`);
           }
         }
       } catch (error) {
@@ -2800,38 +2865,38 @@ onMounted(async () => {
         // Fall back to project ID from event if available
         if (event.projectId) {
           newProjectKey = event.projectId;
-          console.log(`Using project ID as fallback: ${event.projectId}`);
+          //console.log(`Using project ID as fallback: ${event.projectId}`);
         } else {
           newProjectKey = 'default';
-          console.log(`Using 'default' as fallback`);
+          //console.log(`Using 'default' as fallback`);
         }
       }
       
       if (newProjectKey !== currentProjectId.value) {
         const oldProjectId = currentProjectId.value;
-        console.log('Project changed from', oldProjectId, 'to', newProjectKey);
+        //console.log('Project changed from', oldProjectId, 'to', newProjectKey);
         
         // IMPORTANT: Save current project's sessions BEFORE switching
         // This ensures we don't lose data when switching projects
         if (sessions.value.length > 0 && oldProjectId && oldProjectId !== 'default') {
-          console.log('Saving sessions for old project before switch:', oldProjectId);
+          //console.log('Saving sessions for old project before switch:', oldProjectId);
           // Save with the old project ID (currentProjectId.value is still oldProjectId at this point)
           await saveSessionsToStorage();
         }
         
         // Now switch to the new project
         currentProjectId.value = newProjectKey;
-        console.log('Set currentProjectId to:', newProjectKey);
+        //console.log('Set currentProjectId to:', newProjectKey);
         
         // Clear current sessions before loading new ones
         sessions.value = [];
         currentSessionId.value = null;
         
         // Load sessions for the new project
-        console.log('Loading sessions for new project:', newProjectKey);
+        //console.log('Loading sessions for new project:', newProjectKey);
         await loadSessionsFromStorage();
       } else {
-        console.log('Project key unchanged, no action needed');
+        //console.log('Project key unchanged, no action needed');
       }
     } catch (error) {
       console.error('Failed to handle project change:', error);
@@ -2920,17 +2985,18 @@ onMounted(async () => {
 //###################################
 // debug db
 //###################################
-const showDatabaseContents = async () => {
-  try {
-   await sdk.backend.logDatabaseContents();
-  } catch (error) {
-    console.error('Error showing database contents:', error);
-  }
-};
+// const showDatabaseContents = async () => {
+//   try {
+//    await sdk.backend.logDatabaseContents();
+//   } catch (error) {
+//     console.error('Error showing database contents:', error);
+//   }
+// };
 
 //###################################
-// Global Settings Management
+// Global Settings Functions
 //###################################
+
 const loadGlobalSettings = async () => {
   try {
     const result = await sdk.backend.loadGlobalSettingsFromDb();
@@ -2999,8 +3065,9 @@ const resetPlaceholders = () => {
 //###################################
 
 //###################################
-// Migration function
+// Migration Functions
 //###################################
+
 const migrateLocalStorageToDb = async () => {
   try {
     const sessionsData: Record<string, any[]> = {};
@@ -3136,7 +3203,7 @@ const hasLocalStorageData = ref(false);
 // Check migration status on mount
 const checkMigrationStatus = async () => {
   try {
-    console.log('Checking migration status...');
+    //console.log('Checking migration status...');
     
     // Check if the function exists and is callable (in case extension needs reload)
     // Use try-catch to safely check if the function exists
@@ -3166,7 +3233,7 @@ const checkMigrationStatus = async () => {
             if (sdk.backend.loadSessionsFromDb && typeof sdk.backend.loadSessionsFromDb === 'function') {
               const sessionsResult = await sdk.backend.loadSessionsFromDb(projectKey);
               if (sessionsResult.kind === "Ok" && sessionsResult.value && sessionsResult.value.length > 0) {
-                console.log('Found sessions in database, assuming migration completed');
+                //console.log('Found sessions in database, assuming migration completed');
                 hasLocalStorageData.value = false;
                 return;
               }
@@ -3197,7 +3264,7 @@ const checkMigrationStatus = async () => {
       
       if (migrationCheck.kind === "Ok" && migrationCheck.value === true) {
         // Migration already done, don't show button even if localStorage has data
-        console.log('Migration already completed, hiding button');
+        //console.log('Migration already completed, hiding button');
         hasLocalStorageData.value = false;
         return;
       }
@@ -3334,6 +3401,7 @@ const checkMigrationStatus = async () => {
                 :getStatusClass="getStatusClass"
                 :getStatusIcon="getStatusIcon"
                 :getTestCaseId="getTestCaseId"
+                :testErrorMessage="testErrorMessage"
                 @update:baseUrl="baseUrl = $event"
                 @update:customHeaders="customHeaders = $event"
                 @update:useRandomValues="useRandomValues = $event"
@@ -3344,6 +3412,7 @@ const checkMigrationStatus = async () => {
                 @runSingleTest="runSingleTest"
                 @runAllMethods="runAllMethods"
                 @clearEndpointSearch="clearEndpointSearch"
+                @clearTestError="testErrorMessage = null"
                 @updateTestCasePathVariable="(tc, v, val) => { if (!testCasePathVariableValues[getTestCaseId(tc)]) testCasePathVariableValues[getTestCaseId(tc)] = {}; testCasePathVariableValues[getTestCaseId(tc)][v] = val; }"
                 @updateTestCaseQueryParameter="(tc, p, val) => { if (!testCaseQueryParameterValues[getTestCaseId(tc)]) testCaseQueryParameterValues[getTestCaseId(tc)] = {}; testCaseQueryParameterValues[getTestCaseId(tc)][p] = val; }"
                 @updateTestCaseBodyVariable="(tc, k, val) => { if (!testCaseBodyVariableValues[getTestCaseId(tc)]) testCaseBodyVariableValues[getTestCaseId(tc)] = {}; testCaseBodyVariableValues[getTestCaseId(tc)][k] = val; }"

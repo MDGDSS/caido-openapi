@@ -1327,6 +1327,8 @@ const loadGlobalSettingsFromDb = async (sdk: SDK): Promise<Result<any>> => {
   }
 };
 
+// Debug function - logs database contents to console
+/*
 const logDatabaseContents = async (sdk: SDK): Promise<Result<void>> => {
   try {
     const db = await sdk.meta.db();
@@ -1359,6 +1361,7 @@ const logDatabaseContents = async (sdk: SDK): Promise<Result<void>> => {
     };
   }
 };
+*/
 
 // Get all project keys that have sessions in the database
 const getAllSessionProjectKeys = async (sdk: SDK): Promise<Result<string[]>> => {
@@ -1487,7 +1490,7 @@ export type API = DefineAPI<{
   loadTestResultsFromDb: typeof loadTestResultsFromDb;
   saveGlobalSettingsToDb: typeof saveGlobalSettingsToDb;
   loadGlobalSettingsFromDb: typeof loadGlobalSettingsFromDb;
-  logDatabaseContents: typeof logDatabaseContents;
+  // logDatabaseContents: typeof logDatabaseContents; // Debug function - commented out
   migrateFromLocalStorage: typeof migrateFromLocalStorage;
   getAllSessionProjectKeys: typeof getAllSessionProjectKeys;
   isMigrationCompleted: typeof isMigrationCompleted;
@@ -1527,7 +1530,7 @@ export function init(sdk: SDK<API>) {
   sdk.api.register("loadTestResultsFromDb", loadTestResultsFromDb);
   sdk.api.register("saveGlobalSettingsToDb", saveGlobalSettingsToDb);
   sdk.api.register("loadGlobalSettingsFromDb", loadGlobalSettingsFromDb);
-  sdk.api.register("logDatabaseContents", logDatabaseContents);
+  // sdk.api.register("logDatabaseContents", logDatabaseContents); // Debug function - commented out
   sdk.api.register("migrateFromLocalStorage", migrateFromLocalStorage);
   sdk.api.register("getAllSessionProjectKeys", getAllSessionProjectKeys);
   sdk.api.register("isMigrationCompleted", isMigrationCompleted);

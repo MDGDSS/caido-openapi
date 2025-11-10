@@ -12,6 +12,16 @@
         </p>
       </div> -->
           <div class="space-y-4">
+            <!-- Test Error Message -->
+            <div v-if="testErrorMessage">
+              <Message severity="error" :closable="true" @close="$emit('clearTestError')">
+                <template #messageicon><i class="pi pi-exclamation-triangle"></i></template>
+                <div>
+                  <div class="font-semibold">Test Error</div>
+                  <div class="mt-1 text-sm">{{ testErrorMessage }}</div>
+                </div>
+              </Message>
+            </div>
             <Card>
               <template #title>Test Configuration</template>
               <template #content>
@@ -126,8 +136,9 @@ import InputText from "primevue/inputtext";
 import Textarea from "primevue/textarea";
 import Button from "primevue/button";
 import Card from "primevue/card";
+import Message from "primevue/message";
 
-const props = defineProps<{
+defineProps<{
   isSchemaLoaded: boolean;
   baseUrl: string;
   customHeaders: string;
@@ -145,6 +156,7 @@ const props = defineProps<{
   getStatusClass: (success: boolean) => string;
   getStatusIcon: (success: boolean) => string;
   getTestCaseId: (testCase: any) => string;
+  testErrorMessage: string | null;
 }>();
 
 const emit = defineEmits<{
@@ -161,6 +173,7 @@ const emit = defineEmits<{
   'updateTestCasePathVariable': [testCase: any, variable: string, value: string];
   'updateTestCaseQueryParameter': [testCase: any, paramName: string, value: string];
   'updateTestCaseBodyVariable': [testCase: any, key: string, value: any];
+  'clearTestError': [];
 }>();
 
 const updateTestCasePathVariable = (testCase: any, variable: string, value: string) => {

@@ -30,7 +30,7 @@ export interface FrontendSDK {
     loadTestResultsFromDb: () => Promise<{ kind: "Error"; error: string } | { kind: "Ok"; value: any }>;
     saveGlobalSettingsToDb: (settings: any) => Promise<{ kind: "Error"; error: string } | { kind: "Ok"; value: undefined }>;
     loadGlobalSettingsFromDb: () => Promise<{ kind: "Error"; error: string } | { kind: "Ok"; value: any }>;
-    logDatabaseContents: () => Promise<{ kind: "Error"; error: string } | { kind: "Ok"; value: undefined }>;
+    // logDatabaseContents: () => Promise<{ kind: "Error"; error: string } | { kind: "Ok"; value: undefined }>; // Debug function - commented out
     migrateFromLocalStorage: (localStorageData: { sessions: Record<string, any[]>, testResults: any }) => Promise<{ kind: "Error"; error: string } | { kind: "Ok"; value: { sessionsMigrated: number; testResultsMigrated: boolean } }>;
     getAllSessionProjectKeys: () => Promise<{ kind: "Error"; error: string } | { kind: "Ok"; value: string[] }>;
     isMigrationCompleted: () => Promise<{ kind: "Error"; error: string } | { kind: "Ok"; value: boolean }>;
