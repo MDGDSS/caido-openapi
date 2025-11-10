@@ -46,6 +46,8 @@ interface TestResult {
   responseTime: number;
   error?: string;
   response?: any;
+  responseHeaders?: Record<string, string>; // Store actual response headers
+  responseRaw?: string; // Store raw response text if available
   actualBody?: any; // Store the actual body that was sent
   requestPath?: string;
   requestQuery?: string;
@@ -648,6 +650,9 @@ const executeTest = async (sdk: SDK, testCase: TestCase, options: TestOptions, p
         let responseBodyObj: any;
         let requestRawText: string | undefined = undefined;
         let requestId: string | undefined = undefined;
+        let responseHeaders: Record<string, string> = {};
+        let responseRaw: string | undefined = undefined;
+        
         if (typeof sentRequest.response.getCode === 'function') {
           statusCode = sentRequest.response.getCode();
         } else if (sentRequest.response.status) {
@@ -657,6 +662,57 @@ const executeTest = async (sdk: SDK, testCase: TestCase, options: TestOptions, p
         } else {
           statusCode = 0;
         }
+        
+        // Try to capture response headers
+        try {
+          if (typeof sentRequest.response.getHeaders === 'function') {
+            const headers = sentRequest.response.getHeaders();
+            if (headers && typeof headers === 'object') {
+              // Headers might be a Map, object, or array of [key, value] pairs
+              if (headers instanceof Map) {
+                headers.forEach((value, key) => {
+                  responseHeaders[key] = String(value);
+                });
+              } else if (Array.isArray(headers)) {
+                headers.forEach(([key, value]) => {
+                  responseHeaders[String(key)] = String(value);
+                });
+              } else {
+                // Assume it's a plain object
+                Object.entries(headers).forEach(([key, value]) => {
+                  responseHeaders[key] = String(value);
+                });
+              }
+            }
+          } else if (sentRequest.response.headers) {
+            // Try direct headers property
+            const headers = sentRequest.response.headers;
+            if (headers instanceof Map) {
+              headers.forEach((value, key) => {
+                responseHeaders[key] = String(value);
+              });
+            } else if (Array.isArray(headers)) {
+              headers.forEach(([key, value]) => {
+                responseHeaders[String(key)] = String(value);
+              });
+            } else {
+              Object.entries(headers).forEach(([key, value]) => {
+                responseHeaders[key] = String(value);
+              });
+            }
+          }
+          
+          // Try to get raw response text (includes headers)
+          if (typeof sentRequest.response.getRaw === 'function') {
+            const rawResp = sentRequest.response.getRaw();
+            if (rawResp && typeof rawResp.toText === 'function') {
+              responseRaw = rawResp.toText();
+            }
+          }
+        } catch (_) {
+          // ignore header extraction errors
+        }
+        
         // Try to capture the raw request text that was actually sent
         try {
           if (sentRequest.request && typeof sentRequest.request.getRaw === 'function') {
@@ -710,6 +766,8 @@ const executeTest = async (sdk: SDK, testCase: TestCase, options: TestOptions, p
           status: statusCode,
           responseTime,
           response: responseData,
+          responseHeaders: Object.keys(responseHeaders).length > 0 ? responseHeaders : undefined,
+          responseRaw,
           actualBody: requestBody,
           requestPath: fullPath,
           requestQuery: queryStringRaw,
@@ -1122,7 +1180,28 @@ async function sendResultToReplay(
 const saveSessionsToDb = async (sdk: SDK, projectId: string, sessions: any[]): Promise<Result<void>> => {
   try {
     const db = await sdk.meta.db();
-    const value = JSON.stringify(sessions);
+    
+    // Clean and serialize sessions data
+    const cleanedSessions = sessions.map(session => {
+      const cleaned: any = {};
+      for (const [key, value] of Object.entries(session)) {
+        // Skip functions and undefined values
+        if (typeof value === 'function' || value === undefined) {
+          continue;
+        }
+        // Convert Sets to arrays
+        if (value instanceof Set) {
+          cleaned[key] = Array.from(value);
+        } else if (value instanceof Map) {
+          cleaned[key] = Array.from(value.entries());
+        } else {
+          cleaned[key] = value;
+        }
+      }
+      return cleaned;
+    });
+    
+    const value = JSON.stringify(cleanedSessions);
     const key = `openapi-sessions-${projectId}`;
     const stmt = await db.prepare(`
       INSERT OR REPLACE INTO config (key, value) 
@@ -1131,6 +1210,7 @@ const saveSessionsToDb = async (sdk: SDK, projectId: string, sessions: any[]): P
     await stmt.run(key, value);
     return { kind: "Ok", value: undefined };
   } catch (error) {
+    sdk.console.error(`Failed to save sessions: ${error instanceof Error ? error.message : String(error)}`);
     return {
       kind: "Error",
       error: `Failed to save sessions: ${error instanceof Error ? error.message : String(error)}`,
@@ -1198,6 +1278,55 @@ const loadTestResultsFromDb = async (sdk: SDK): Promise<Result<any>> => {
 };
 
 // Log all database contents
+const saveGlobalSettingsToDb = async (sdk: SDK, settings: any): Promise<Result<void>> => {
+  try {
+    const db = await sdk.meta.db();
+    const value = JSON.stringify(settings);
+    const key = 'openapi-global-settings';
+    const stmt = await db.prepare(`
+      INSERT OR REPLACE INTO config (key, value) 
+      VALUES (?, ?)
+    `);
+    await stmt.run(key, value);
+    return { kind: "Ok", value: undefined };
+  } catch (error) {
+    return { kind: "Error", error: error instanceof Error ? error.message : String(error) };
+  }
+};
+
+const loadGlobalSettingsFromDb = async (sdk: SDK): Promise<Result<any>> => {
+  try {
+    const db = await sdk.meta.db();
+    const key = 'openapi-global-settings';
+    const stmt = await db.prepare(`SELECT value FROM config WHERE key = ?`);
+    const result = await stmt.get<{ value: string }>(key);
+    
+    if (result === undefined || result.value === undefined) {
+      // Return default settings if none exist
+      return { kind: "Ok", value: {
+        workers: 10,
+        delayBetweenRequests: 100,
+        timeout: 30000,
+        allowDeleteInAllMethods: false,
+        defaultPlaceholders: {
+          string: 'string',
+          integer: 0,
+          number: 0,
+          boolean: true,
+          email: 'user@example.com',
+          date: '2023-01-01',
+          dateTime: '2023-01-01T00:00:00Z',
+          uuid: '123e4567-e89b-12d3-a456-426614174000'
+        }
+      } };
+    }
+    const settings = JSON.parse(result.value) as any;
+    return { kind: "Ok", value: settings };
+  } catch (error) {
+    return { kind: "Error", error: error instanceof Error ? error.message : String(error) };
+  }
+};
+
 const logDatabaseContents = async (sdk: SDK): Promise<Result<void>> => {
   try {
     const db = await sdk.meta.db();
@@ -1227,6 +1356,52 @@ const logDatabaseContents = async (sdk: SDK): Promise<Result<void>> => {
     return {
       kind: "Error",
       error: `Failed to log database contents: ${error instanceof Error ? error.message : String(error)}`,
+    };
+  }
+};
+
+// Get all project keys that have sessions in the database
+const getAllSessionProjectKeys = async (sdk: SDK): Promise<Result<string[]>> => {
+  try {
+    const db = await sdk.meta.db();
+    const stmt = await db.prepare(`SELECT key FROM config WHERE key LIKE 'openapi-sessions-%'`);
+    const allRows = await stmt.all<{ key: string }>();
+    
+    const projectKeys = allRows.map(row => {
+      // Extract project key from key (format: openapi-sessions-{projectKey})
+      return row.key.replace('openapi-sessions-', '');
+    }).filter(key => key.length > 0);
+    
+    return { kind: "Ok", value: projectKeys };
+  } catch (error) {
+    return {
+      kind: "Error",
+      error: `Failed to get session project keys: ${error instanceof Error ? error.message : String(error)}`,
+    };
+  }
+};
+
+// Check if migration has been completed
+const isMigrationCompleted = async (sdk: SDK): Promise<Result<boolean>> => {
+  try {
+    const db = await sdk.meta.db();
+    const stmt = await db.prepare(`SELECT value FROM config WHERE key = 'openapi-migrated'`);
+    const row = await stmt.first<{ value: string }>();
+    
+    sdk.console.log(`Migration check - row:`, row);
+    
+    if (row && (row.value === 'true' || row.value === true || String(row.value).toLowerCase() === 'true')) {
+      sdk.console.log('Migration completed flag found, returning true');
+      return { kind: "Ok", value: true };
+    }
+    
+    sdk.console.log('Migration completed flag not found or not true, returning false');
+    return { kind: "Ok", value: false };
+  } catch (error) {
+    sdk.console.error(`Failed to check migration status: ${error instanceof Error ? error.message : String(error)}`);
+    return {
+      kind: "Error",
+      error: `Failed to check migration status: ${error instanceof Error ? error.message : String(error)}`,
     };
   }
 };
@@ -1268,6 +1443,19 @@ const migrateFromLocalStorage = async (sdk: SDK, localStorageData: { sessions: R
     
     sdk.console.log(`Migration complete: ${sessionsMigrated} sessions migrated, test results: ${testResultsMigrated ? 'yes' : 'no'}`);
     
+    // Set migrated flag in database
+    try {
+      const db = await sdk.meta.db();
+      const stmt = await db.prepare(`
+        INSERT OR REPLACE INTO config (key, value) 
+        VALUES ('openapi-migrated', 'true')
+      `);
+      await stmt.run();
+      sdk.console.log('Migration flag set in database');
+    } catch (error) {
+      sdk.console.error(`Failed to set migration flag: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    
     return { 
       kind: "Ok", 
       value: { sessionsMigrated, testResultsMigrated } 
@@ -1297,8 +1485,12 @@ export type API = DefineAPI<{
   loadSessionsFromDb: typeof loadSessionsFromDb;
   saveTestResultsToDb: typeof saveTestResultsToDb;
   loadTestResultsFromDb: typeof loadTestResultsFromDb;
+  saveGlobalSettingsToDb: typeof saveGlobalSettingsToDb;
+  loadGlobalSettingsFromDb: typeof loadGlobalSettingsFromDb;
   logDatabaseContents: typeof logDatabaseContents;
   migrateFromLocalStorage: typeof migrateFromLocalStorage;
+  getAllSessionProjectKeys: typeof getAllSessionProjectKeys;
+  isMigrationCompleted: typeof isMigrationCompleted;
 }>;
 
 export function init(sdk: SDK<API>) {
@@ -1333,8 +1525,12 @@ export function init(sdk: SDK<API>) {
   sdk.api.register("loadSessionsFromDb", loadSessionsFromDb);
   sdk.api.register("saveTestResultsToDb", saveTestResultsToDb);
   sdk.api.register("loadTestResultsFromDb", loadTestResultsFromDb);
+  sdk.api.register("saveGlobalSettingsToDb", saveGlobalSettingsToDb);
+  sdk.api.register("loadGlobalSettingsFromDb", loadGlobalSettingsFromDb);
   sdk.api.register("logDatabaseContents", logDatabaseContents);
   sdk.api.register("migrateFromLocalStorage", migrateFromLocalStorage);
+  sdk.api.register("getAllSessionProjectKeys", getAllSessionProjectKeys);
+  sdk.api.register("isMigrationCompleted", isMigrationCompleted);
 }
 
 // Set environment variable using backend SDK

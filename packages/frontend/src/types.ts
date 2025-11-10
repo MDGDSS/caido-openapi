@@ -28,8 +28,12 @@ export interface FrontendSDK {
     loadSessionsFromDb: (projectId: string) => Promise<{ kind: "Error"; error: string } | { kind: "Ok"; value: any[] }>;
     saveTestResultsToDb: (testResults: any) => Promise<{ kind: "Error"; error: string } | { kind: "Ok"; value: undefined }>;
     loadTestResultsFromDb: () => Promise<{ kind: "Error"; error: string } | { kind: "Ok"; value: any }>;
+    saveGlobalSettingsToDb: (settings: any) => Promise<{ kind: "Error"; error: string } | { kind: "Ok"; value: undefined }>;
+    loadGlobalSettingsFromDb: () => Promise<{ kind: "Error"; error: string } | { kind: "Ok"; value: any }>;
     logDatabaseContents: () => Promise<{ kind: "Error"; error: string } | { kind: "Ok"; value: undefined }>;
     migrateFromLocalStorage: (localStorageData: { sessions: Record<string, any[]>, testResults: any }) => Promise<{ kind: "Error"; error: string } | { kind: "Ok"; value: { sessionsMigrated: number; testResultsMigrated: boolean } }>;
+    getAllSessionProjectKeys: () => Promise<{ kind: "Error"; error: string } | { kind: "Ok"; value: string[] }>;
+    isMigrationCompleted: () => Promise<{ kind: "Error"; error: string } | { kind: "Ok"; value: boolean }>;
     // Session management
     createSession: (name: string, schema: any, configuration: any) => Promise<any>;
     getSession: (id: string) => Promise<any>;

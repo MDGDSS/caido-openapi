@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import Button from "primevue/button";
+import Dialog from "primevue/dialog";
 
 // Extend window interface for our custom property
 declare global {
@@ -8,15 +9,20 @@ declare global {
   }
 }
 import InputText from "primevue/inputtext";
-import Textarea from "primevue/textarea";
-import Card from "primevue/card";
-import Message from "primevue/message";
+// import Textarea from "primevue/textarea";
+// import Card from "primevue/card";
+// import Message from "primevue/message";
 import TabView from "primevue/tabview";
 import TabPanel from "primevue/tabpanel";
-import InputNumber from "primevue/inputnumber";
+// import InputNumber from "primevue/inputnumber";
 import { ref, computed, watch, nextTick, onMounted, onUnmounted } from "vue";
 
 import { useSDK } from "@/plugins/sdk";
+import InputTab from "@/components/InputTab.vue";
+import EndpointsTab from "@/components/EndpointsTab.vue";
+import DefinitionTab from "@/components/DefinitionTab.vue";
+import ResultsTab from "@/components/ResultsTab.vue";
+import SettingsTab from "@/components/SettingsTab.vue";
 
 const sdk = useSDK();
 
@@ -36,32 +42,10 @@ const openGitHubInBrowser = () => {
   }
 };
 
-// Check if localStorage has data to migrate
-const hasLocalStorageData = computed(() => {
-  try {
-    return localStorage.getItem('openapi-testing-results') !== null;
-  } catch {
-    return false;
-  }
-});
 
-// Get project key - use project ID if available, otherwise use openapi env var, otherwise 'default'
+// Get project key - check openapi env var first, then use project ID as fallback
 const getProjectKey = async (projectId?: string): Promise<string> => {
-  // First, try to use the provided project ID
-  if (projectId) {
-    console.log(`Using project ID as key: ${projectId}`);
-    return projectId;
-  }
-  
-  // Second, try to get project ID from current project
-  try {
-    // Try to get current project ID from the SDK if available
-    // Note: This might not be directly available, so we'll rely on the project change event
-  } catch (error) {
-    console.warn('Failed to get project ID:', error);
-  }
-  
-  // Third, try openapi environment variable
+  // FIRST: Check if openapi environment variable is available
   try {
     const openapiValue = await sdk.env.getVar('openapi');
     if (openapiValue) {
@@ -72,78 +56,17 @@ const getProjectKey = async (projectId?: string): Promise<string> => {
     console.warn('Failed to get openapi env var:', error);
   }
   
-  // Fallback to 'default' if nothing found
+  // SECOND: If no openapi env var, use project ID if provided
+  if (projectId) {
+    console.log(`No 'openapi' env var found, using project ID as key: ${projectId}`);
+    return projectId;
+  }
+  
+  // THIRD: Fallback to 'default' if no project ID available
+  console.log(`No 'openapi' env var and no project ID, using 'default' key`);
   return 'default';
 };
 
-// Show database contents
-const showDatabaseContents = async () => {
-  try {
-    const result = await sdk.backend.logDatabaseContents();
-
-  } catch (error) {
-    console.error('Error showing database contents:', error);
-    alert(`Error: ${error instanceof Error ? error.message : String(error)}`);
-  }
-};
-
-// Migration function
-const migrateLocalStorageToDb = async () => {
-  try {
-    const sessionsData: Record<string, any[]> = {};
-    let testResultsData: any = null;
-    
-    // Collect all session data from localStorage
-    try {
-      for (let i = 0; i < localStorage.length; i++) {
-        const key = localStorage.key(i);
-        if (key && key.startsWith('openapi-sessions-')) {
-          const value = localStorage.getItem(key);
-          if (value) {
-            try {
-              sessionsData[key] = JSON.parse(value);
-            } catch (parseError) {
-              console.error(`Failed to parse localStorage key ${key}:`, parseError);
-            }
-          }
-        }
-      }
-    } catch (error) {
-      console.error('Error reading sessions from localStorage:', error);
-    }
-    
-    // Get test results from localStorage
-    try {
-      const testResultsStr = localStorage.getItem('openapi-testing-results');
-      if (testResultsStr) {
-        testResultsData = JSON.parse(testResultsStr);
-      }
-    } catch (error) {
-      console.error('Error reading test results from localStorage:', error);
-    }
-    
-    // Migrate to database (no environment variable migration needed)
-    const result = await sdk.backend.migrateFromLocalStorage({
-      sessions: sessionsData,
-      testResults: testResultsData
-    });
-    
-    if (result.kind === "Ok") {
-      console.log(`Migration successful: ${result.value.sessionsMigrated} sessions, test results: ${result.value.testResultsMigrated ? 'yes' : 'no'}`);
-      // Reload sessions from database after migration
-      await loadSessionsFromStorage();
-      // Reload test results from database after migration
-      await loadResultsFromStorage();
-      alert(`Migration complete!\n${result.value.sessionsMigrated} sessions migrated\nTest results: ${result.value.testResultsMigrated ? 'Migrated' : 'Not found'}`);
-    } else {
-      console.error('Migration failed:', result.error);
-      alert(`Migration failed: ${result.error}`);
-    }
-  } catch (error) {
-    console.error('Migration error:', error);
-    alert(`Migration error: ${error instanceof Error ? error.message : String(error)}`);
-  }
-};
 
 // Session management
 interface OpenAPISession {
@@ -151,15 +74,15 @@ interface OpenAPISession {
   name: string;
   schemaText: string;
   baseUrl: string;
-  workers: number;
-  delayBetweenRequests: number;
-  timeout: number;
   useRandomValues: boolean;
   useParameterFromDefinition: boolean;
   testResults: any[];
   testCases: any[];
   isSchemaLoaded: boolean;
+  isRawMode?: boolean;
+  rawEndpoints?: string;
   pathVariableValues: Record<string, string[]>;
+  queryParameterValues: Record<string, string[]>;
   bodyVariableValues: Record<string, string[]>;
   customHeaders: string;
   variablesExpanded: boolean;
@@ -181,12 +104,26 @@ const currentProjectId = ref<string>('default');
 const editingSessionId = ref<string | null>(null);
 const editingSessionName = ref<string>('');
 
+// Global settings (stored in database, not per session)
+const workers = ref(10);
+const delayBetweenRequests = ref(100);
+const timeout = ref(30000);
+const allowDeleteInAllMethods = ref(false);
+const defaultPlaceholders = ref({
+  string: 'string',
+  integer: 0,
+  number: 0,
+  boolean: true,
+  email: 'user@example.com',
+  date: '2023-01-01',
+  dateTime: '2023-01-01T00:00:00Z',
+  uuid: '123e4567-e89b-12d3-a456-426614174000'
+});
+const showSettingsDialog = ref(false);
+
 // Reactive state (now session-specific)
 const schemaText = ref("");
 const baseUrl = ref("https://google.com");
-const workers = ref(10);
-const delayBetweenRequests = ref(0);
-const timeout = ref(30000);
 const useRandomValues = ref(false);
 const useParameterFromDefinition = ref(true); // Default to true to use example values
 const isLoading = ref(false);
@@ -195,7 +132,11 @@ const testResults = ref<any[]>([]);
 const activeTab = ref(0);
 const testCases = ref<any[]>([]);
 const isSchemaLoaded = ref(false);
+const isRawMode = ref(false); // Track if we're in raw endpoint mode
+const inputMode = ref<'schema' | 'raw'>('schema');
+const rawEndpoints = ref("");
 const pathVariableValues = ref<Record<string, string[]>>({});
+const queryParameterValues = ref<Record<string, string[]>>({});
 const bodyVariableValues = ref<Record<string, string[]>>({});
 const runningTests = ref<Set<string>>(new Set());
 const sidebarOpen = ref(true);
@@ -209,26 +150,18 @@ const requestResponseTab = ref('request');
 const testCasePathVariableValues = ref<Record<string, Record<string, string>>>({});
 const testCaseQueryParameterValues = ref<Record<string, Record<string, string>>>({});
 const testCaseBodyVariableValues = ref<Record<string, Record<string, any>>>({});
-const requestEditor = ref<any>(null);
-const responseEditor = ref<any>(null);
-const currentExpandedId = ref<string | null>(null);
+
 const requestEditorContainers = ref<Map<string, HTMLElement>>(new Map());
 const responseEditorContainers = ref<Map<string, HTMLElement>>(new Map());
 
-// HTTPQL state
-const httpqlQuery = ref("");
-const httpqlResults = ref("");
-const isHttpqlRunning = ref(false);
 const filteredTestResults = ref<any[]>([]);
 const isQueryActive = ref(false);
 
 // Endpoint search functionality
 const endpointSearchQuery = ref("");
-const filteredTestCases = ref<any[]>([]);
-// Schema definition viewer state
+
 const parsedSchema = ref<any>(null);
-const selectedPath = ref("");
-const selectedMethod = ref("");
+
 const expandedPaths = ref<Set<string>>(new Set());
 const expandedComponents = ref<Set<string>>(new Set());
 
@@ -268,15 +201,13 @@ const createNewSession = (): OpenAPISession => {
     name: sessionName,
     schemaText: "",
     baseUrl: "http://localhost:3000",
-    workers: 10,
-    delayBetweenRequests: 0,
-    timeout: 30000,
     useRandomValues: false,
     useParameterFromDefinition: true,
     testResults: [],
     testCases: [],
     isSchemaLoaded: false,
     pathVariableValues: {},
+    queryParameterValues: {},
     bodyVariableValues: {},
     customHeaders: "",
     variablesExpanded: true,
@@ -302,15 +233,15 @@ const saveCurrentSession = async () => {
     // Convert Sets to Arrays for storage
     currentSession.schemaText = schemaText.value;
     currentSession.baseUrl = baseUrl.value;
-    currentSession.workers = workers.value;
-    currentSession.delayBetweenRequests = delayBetweenRequests.value;
-    currentSession.timeout = timeout.value;
     currentSession.useRandomValues = useRandomValues.value;
     currentSession.useParameterFromDefinition = useParameterFromDefinition.value;
     currentSession.testResults = [...testResults.value];
     currentSession.testCases = [...testCases.value];
     currentSession.isSchemaLoaded = isSchemaLoaded.value;
+    currentSession.isRawMode = isRawMode.value;
+    currentSession.rawEndpoints = rawEndpoints.value;
     currentSession.pathVariableValues = { ...pathVariableValues.value };
+    currentSession.queryParameterValues = { ...queryParameterValues.value };
     currentSession.bodyVariableValues = { ...bodyVariableValues.value };
     currentSession.customHeaders = customHeaders.value;
     currentSession.variablesExpanded = variablesExpanded.value;
@@ -328,52 +259,109 @@ const saveCurrentSession = async () => {
 };
 
 const loadSession = async (sessionId: string) => {
-  const session = sessions.value.find(s => s.id === sessionId);
-  if (!session) return;
-  
-  // Save current session before switching (only if switching to a different session)
-  if (currentSessionId.value && currentSessionId.value !== sessionId) {
-    await saveCurrentSession();
-  }
-  
-  // Load new session data
-  schemaText.value = session.schemaText || '';
-  baseUrl.value = session.baseUrl || '';
-  workers.value = session.workers || 10;
-  delayBetweenRequests.value = session.delayBetweenRequests || 100;
-  timeout.value = session.timeout || 30000;
-  useRandomValues.value = session.useRandomValues || false;
-  useParameterFromDefinition.value = session.useParameterFromDefinition !== undefined ? session.useParameterFromDefinition : true;
-  testResults.value = [...(session.testResults || [])];
-  testCases.value = [...(session.testCases || [])];
-  isSchemaLoaded.value = session.isSchemaLoaded || false;
-  pathVariableValues.value = { ...(session.pathVariableValues || {}) };
-  bodyVariableValues.value = { ...(session.bodyVariableValues || {}) };
-  customHeaders.value = session.customHeaders || '';
-  variablesExpanded.value = session.variablesExpanded || false;
-  expandedResults.value = new Set(session.expandedResults || []);
-  expandedTestCases.value = new Set(session.expandedTestCases || []);
-  requestResponseTab.value = session.requestResponseTab || 'request';
-  testCasePathVariableValues.value = { ...(session.testCasePathVariableValues || {}) };
-  testCaseQueryParameterValues.value = { ...(session.testCaseQueryParameterValues || {}) };
-  testCaseBodyVariableValues.value = { ...(session.testCaseBodyVariableValues || {}) };
-  
-  // Re-parse schema if it was loaded in this session
-  if (session.isSchemaLoaded && schemaText.value) {
+  try {
+    console.log(`loadSession called with sessionId: ${sessionId}`);
+    console.log(`Available sessions: ${sessions.value.length}`, sessions.value.map(s => ({ id: s.id, name: s.name })));
+    
+    const session = sessions.value.find(s => s.id === sessionId);
+    if (!session) {
+      console.error(`Session ${sessionId} not found in sessions array!`);
+      // Set a default session ID to prevent UI from breaking
+      if (sessions.value.length > 0) {
+        currentSessionId.value = sessions.value[0].id;
+      }
+      return;
+    }
+    
+    console.log(`Loading session: ${session.name} (${session.id})`);
+    console.log(`Session data:`, {
+      hasSchemaText: !!session.schemaText,
+      schemaTextLength: session.schemaText?.length || 0,
+      hasTestCases: !!session.testCases,
+      testCasesCount: Array.isArray(session.testCases) ? session.testCases.length : 0,
+      hasTestResults: !!session.testResults,
+      testResultsCount: Array.isArray(session.testResults) ? session.testResults.length : 0,
+      isSchemaLoaded: session.isSchemaLoaded
+    });
+    
+    // Save current session before switching (only if switching to a different session)
+    if (currentSessionId.value && currentSessionId.value !== sessionId) {
+      try {
+        await saveCurrentSession();
+      } catch (saveError) {
+        console.error('Error saving current session before switch:', saveError);
+        // Continue anyway
+      }
+    }
+    
+    // Load new session data with safe defaults
     try {
-      const schema = parseOpenAPISchemaLocally(schemaText.value);
-      parsedSchema.value = schema;
-    } catch (error) {
-      console.error('Failed to re-parse schema when loading session:', error);
-      parsedSchema.value = null;
+      schemaText.value = session.schemaText || '';
+      baseUrl.value = session.baseUrl || '';
+      useRandomValues.value = session.useRandomValues || false;
+      useParameterFromDefinition.value = session.useParameterFromDefinition !== undefined ? session.useParameterFromDefinition : true;
+      testResults.value = Array.isArray(session.testResults) ? [...session.testResults] : [];
+      testCases.value = Array.isArray(session.testCases) ? [...session.testCases] : [];
+      isSchemaLoaded.value = session.isSchemaLoaded || false;
+      isRawMode.value = session.isRawMode || false;
+      rawEndpoints.value = session.rawEndpoints || '';
+      inputMode.value = session.isRawMode ? 'raw' : 'schema';
+      pathVariableValues.value = session.pathVariableValues && typeof session.pathVariableValues === 'object' ? { ...session.pathVariableValues } : {};
+      queryParameterValues.value = session.queryParameterValues && typeof session.queryParameterValues === 'object' ? { ...session.queryParameterValues } : {};
+      bodyVariableValues.value = session.bodyVariableValues && typeof session.bodyVariableValues === 'object' ? { ...session.bodyVariableValues } : {};
+      customHeaders.value = session.customHeaders || '';
+      variablesExpanded.value = session.variablesExpanded || false;
+      expandedResults.value = Array.isArray(session.expandedResults) ? new Set(session.expandedResults) : new Set();
+      expandedTestCases.value = Array.isArray(session.expandedTestCases) ? new Set(session.expandedTestCases) : new Set();
+      requestResponseTab.value = session.requestResponseTab || 'request';
+      testCasePathVariableValues.value = session.testCasePathVariableValues && typeof session.testCasePathVariableValues === 'object' ? { ...session.testCasePathVariableValues } : {};
+      testCaseQueryParameterValues.value = session.testCaseQueryParameterValues && typeof session.testCaseQueryParameterValues === 'object' ? { ...session.testCaseQueryParameterValues } : {};
+      testCaseBodyVariableValues.value = session.testCaseBodyVariableValues && typeof session.testCaseBodyVariableValues === 'object' ? { ...session.testCaseBodyVariableValues } : {};
+    } catch (dataError) {
+      console.error('Error loading session data:', dataError);
+      // Set safe defaults
+      schemaText.value = '';
+      baseUrl.value = '';
+      testResults.value = [];
+      testCases.value = [];
       isSchemaLoaded.value = false;
     }
-  } else {
-    parsedSchema.value = null;
+    
+    console.log(`Loaded session data:`, {
+      schemaTextLength: schemaText.value.length,
+      testCasesCount: testCases.value.length,
+      testResultsCount: testResults.value.length,
+      isSchemaLoaded: isSchemaLoaded.value
+    });
+    
+    // Re-parse schema if it was loaded in this session
+    if (session.isSchemaLoaded && schemaText.value) {
+      try {
+        console.log('Re-parsing schema...');
+        const schema = parseOpenAPISchemaLocally(schemaText.value);
+        parsedSchema.value = schema;
+        console.log('Schema parsed successfully');
+      } catch (error) {
+        console.error('Failed to re-parse schema when loading session:', error);
+        parsedSchema.value = null;
+        isSchemaLoaded.value = false;
+      }
+    } else {
+      console.log('Skipping schema re-parse (isSchemaLoaded:', session.isSchemaLoaded, ', schemaText length:', schemaText.value.length, ')');
+      parsedSchema.value = null;
+    }
+    
+    currentSessionId.value = sessionId;
+    console.log(`Session ${sessionId} loaded successfully. Current session ID: ${currentSessionId.value}`);
+  } catch (error) {
+    console.error('Critical error in loadSession:', error);
+    // Ensure we always have a valid session ID to prevent UI from breaking
+    if (sessions.value.length > 0) {
+      currentSessionId.value = sessions.value[0].id;
+    }
+    // Re-throw to let caller handle it
+    throw error;
   }
-  
-  currentSessionId.value = sessionId;
-  
 };
 
 const deleteSession = async (sessionId: string) => {
@@ -449,7 +437,7 @@ const handleRenameKeydown = async (event: KeyboardEvent, sessionId: string) => {
 
 const saveSessionsToStorage = async () => {
   try {
-    // ALWAYS check openapi env var first - this is the key we use in the database
+    // Check openapi env var first, then use currentProjectId (which should be project ID) as fallback
     let projectKey: string;
     try {
       const openapiValue = await sdk.env.getVar('openapi');
@@ -458,23 +446,53 @@ const saveSessionsToStorage = async () => {
         projectKey = openapiValue;
         currentProjectId.value = projectKey; // Update currentProjectId to match
       } else {
-        // If no env var, always use 'default' - DO NOT use currentProjectId to avoid random keys
-        projectKey = 'default';
-        console.log(`No 'openapi' env var found, using 'default' key`);
+        // If no env var, use currentProjectId (which should be project ID) as fallback
+        if (currentProjectId.value && currentProjectId.value !== 'default') {
+          projectKey = currentProjectId.value;
+          console.log(`No 'openapi' env var found, using currentProjectId as key: ${currentProjectId.value}`);
+        } else {
+          // Last resort: use 'default' if currentProjectId is not set or is 'default'
+          projectKey = 'default';
+          console.log(`No 'openapi' env var and no valid currentProjectId, using 'default' key`);
+        }
       }
     } catch (error) {
       console.warn('Failed to get openapi env var:', error);
-      // Always fall back to 'default', never use currentProjectId
-      projectKey = 'default';
+      // Fall back to currentProjectId if available
+      if (currentProjectId.value && currentProjectId.value !== 'default') {
+        projectKey = currentProjectId.value;
+        console.log(`Using currentProjectId as fallback: ${currentProjectId.value}`);
+      } else {
+        projectKey = 'default';
+        console.log(`Using 'default' as fallback`);
+      }
     }
     
-    const sessionsData = sessions.value.map(session => ({
-      ...session,
-      expandedResults: Array.from(session.expandedResults),
-      expandedTestCases: Array.from(session.expandedTestCases)
-    }));
+    // Convert sessions to serializable format
+    const sessionsData = sessions.value.map(session => {
+      const serializableSession: any = {};
+      
+      // Copy all properties, handling special cases
+      for (const [key, value] of Object.entries(session)) {
+        // Skip functions and undefined values
+        if (typeof value === 'function' || value === undefined) {
+          continue;
+        }
+        
+        // Convert Sets to arrays
+        if (value instanceof Set) {
+          serializableSession[key] = Array.from(value);
+        } else if (value instanceof Map) {
+          serializableSession[key] = Array.from(value.entries());
+        } else {
+          serializableSession[key] = value;
+        }
+      }
+      
+      return serializableSession;
+    });
     
-    const storageKey = `openapi-sessions-${projectKey}`;
+    // const storageKey = `openapi-sessions-${projectKey}`;
     console.log(`Saving sessions for project key: ${projectKey}`);
     
     // Save to Caido database
@@ -514,7 +532,7 @@ const saveSessionsToStorage = async () => {
 
 const loadSessionsFromStorage = async () => {
   try {
-    // ALWAYS check openapi env var first - this is the key we use in the database
+    // Check openapi env var first, then use currentProjectId (which should be project ID) as fallback
     let projectKey: string;
     try {
       const openapiValue = await sdk.env.getVar('openapi');
@@ -523,14 +541,26 @@ const loadSessionsFromStorage = async () => {
         projectKey = openapiValue;
         currentProjectId.value = projectKey; // Update currentProjectId to match
       } else {
-        // If no env var, always use 'default' - DO NOT use currentProjectId to avoid random keys
-        projectKey = 'default';
-        console.log(`No 'openapi' env var found, using 'default' key`);
+        // If no env var, use currentProjectId (which should be project ID) as fallback
+        if (currentProjectId.value && currentProjectId.value !== 'default') {
+          projectKey = currentProjectId.value;
+          console.log(`No 'openapi' env var found, using currentProjectId as key: ${currentProjectId.value}`);
+        } else {
+          // Last resort: use 'default' if currentProjectId is not set or is 'default'
+          projectKey = 'default';
+          console.log(`No 'openapi' env var and no valid currentProjectId, using 'default' key`);
+        }
       }
     } catch (error) {
       console.warn('Failed to get openapi env var:', error);
-      // Always fall back to 'default', never use currentProjectId
-      projectKey = 'default';
+      // Fall back to currentProjectId if available
+      if (currentProjectId.value && currentProjectId.value !== 'default') {
+        projectKey = currentProjectId.value;
+        console.log(`Using currentProjectId as fallback: ${currentProjectId.value}`);
+      } else {
+        projectKey = 'default';
+        console.log(`Using 'default' as fallback`);
+      }
     }
     
     const storageKey = `openapi-sessions-${projectKey}`;
@@ -543,6 +573,7 @@ const loadSessionsFromStorage = async () => {
       const result = await sdk.backend.loadSessionsFromDb(projectKey);
       if (result.kind === "Ok") {
         sessionsData = result.value;
+        console.log(`Loaded ${sessionsData ? (Array.isArray(sessionsData) ? sessionsData.length : 'non-array') : 'null'} sessions from database for project key: ${projectKey}`);
       } else {
         console.warn('Failed to load sessions from database:', result.error);
       }
@@ -550,79 +581,134 @@ const loadSessionsFromStorage = async () => {
       console.error('Database load failed:', dbError);
     }
     
-    // Keep localStorage code for later migration (commented out but preserved)
-    // TODO: Remove localStorage code after migration button is implemented
-    /*
-    // Try both Caido storage and localStorage, prefer the one with valid data
-    let caidoData = null;
-    let localData = null;
-    
-    // Try Caido storage
-    try {
-      caidoData = await sdk.storage.get(storageKey);
-      
-      // Security check: if the data is just the storage key or empty, treat as no data
-      if (caidoData === storageKey || caidoData === null || caidoData === undefined || caidoData === '') {
-        caidoData = null;
+    // If no sessions found with primary project key, try to find sessions in other project keys
+    if ((!sessionsData || !Array.isArray(sessionsData) || sessionsData.length === 0) && sdk.backend.getAllSessionProjectKeys) {
+      try {
+        console.log('No sessions found with primary project key, searching for sessions in other project keys...');
+        const allKeysResult = await sdk.backend.getAllSessionProjectKeys();
+        if (allKeysResult.kind === "Ok" && allKeysResult.value && allKeysResult.value.length > 0) {
+          console.log(`Found ${allKeysResult.value.length} project keys with sessions:`, allKeysResult.value);
+          
+          // Try loading from each project key until we find sessions
+          for (const otherProjectKey of allKeysResult.value) {
+            if (otherProjectKey === projectKey) continue; // Already tried this one
+            
+            console.log(`Trying to load sessions from project key: ${otherProjectKey}`);
+            const otherResult = await sdk.backend.loadSessionsFromDb(otherProjectKey);
+            if (otherResult.kind === "Ok" && otherResult.value && Array.isArray(otherResult.value) && otherResult.value.length > 0) {
+              console.log(`Found ${otherResult.value.length} sessions in project key: ${otherProjectKey}`);
+              sessionsData = otherResult.value;
+              // Update currentProjectId to match the project key where we found sessions
+              currentProjectId.value = otherProjectKey;
+              projectKey = otherProjectKey;
+              break;
+            }
+          }
+        }
+      } catch (searchError) {
+        console.error('Failed to search for sessions in other project keys:', searchError);
       }
-    } catch (storageError) {
-      console.warn('Caido storage failed:', storageError);
-      caidoData = null;
     }
-    
-    // Try localStorage
-    try {
-      const localDataString = localStorage.getItem(storageKey);
-      if (localDataString) {
-        localData = JSON.parse(localDataString);
-      }
-    } catch (parseError) {
-      console.error('Failed to parse localStorage data:', parseError);
-      localData = null;
-    }
-    
-    // Choose the best data source
-    if (caidoData && Array.isArray(caidoData) && caidoData.length > 0) {
-      sessionsData = caidoData;
-    } else if (localData && Array.isArray(localData) && localData.length > 0) {
-      sessionsData = localData;
-    } else {
-      sessionsData = null;
-    }
-    */
     
     // Also check if sessionsData is an object with sessions property
-    if (sessionsData && typeof sessionsData === 'object' && sessionsData.sessions) {
-      sessionsData = sessionsData.sessions;
+    if (sessionsData && typeof sessionsData === 'object' && !Array.isArray(sessionsData)) {
+      if (sessionsData.sessions && Array.isArray(sessionsData.sessions)) {
+        sessionsData = sessionsData.sessions;
+      } else if (sessionsData.value && Array.isArray(sessionsData.value)) {
+        sessionsData = sessionsData.value;
+      } else {
+        // Try to convert object to array if it has numeric keys
+        const keys = Object.keys(sessionsData);
+        if (keys.length > 0 && keys.every(k => !isNaN(Number(k)))) {
+          sessionsData = Object.values(sessionsData);
+        } else {
+          console.warn('Sessions data is an object but not in expected format:', sessionsData);
+          sessionsData = null;
+        }
+      }
     }
     
     if (sessionsData && Array.isArray(sessionsData)) {
+      console.log(`Processing ${sessionsData.length} sessions...`);
+      console.log('First session sample:', sessionsData[0] ? {
+        id: sessionsData[0].id,
+        name: sessionsData[0].name,
+        hasSchemaText: !!sessionsData[0].schemaText,
+        hasTestCases: !!sessionsData[0].testCases,
+        hasTestResults: !!sessionsData[0].testResults
+      } : 'No sessions');
       
-      sessions.value = sessionsData.map(session => ({
-        ...session,
-        expandedResults: new Set(session.expandedResults || []),
-        expandedTestCases: new Set(session.expandedTestCases || [])
-      }));
-      
-      // Initialize session counter for this project based on existing sessions
-      if (sessions.value.length > 0) {
-        const maxSessionNumber = Math.max(...sessions.value.map(session => {
-          const match = session.name.match(/Session (\d+)/);
-          return match ? parseInt(match[1]) : 0;
-        }));
-        sessionCounter.value[currentProjectId.value] = maxSessionNumber + 1;
+      try {
+        sessions.value = sessionsData.map(session => {
+          try {
+            return {
+              ...session,
+              expandedResults: new Set(session.expandedResults || []),
+              expandedTestCases: new Set(session.expandedTestCases || [])
+            };
+          } catch (mapError) {
+            console.error('Error mapping session:', mapError, session);
+            // Return a minimal valid session object
+            return {
+              ...session,
+              expandedResults: new Set(),
+              expandedTestCases: new Set()
+            };
+          }
+        });
         
+        console.log(`Mapped ${sessions.value.length} sessions to reactive state`);
         
-        // Load the first session
-        await loadSession(sessions.value[0].id);
-      } else {
-        // No sessions found, create a new one
-        sessionCounter.value[currentProjectId.value] = 1;
-        const newSession = createNewSession();
-        sessions.value = [newSession];
-        await loadSession(newSession.id);
+        // Initialize session counter for this project based on existing sessions
+        if (sessions.value.length > 0) {
+          try {
+            const maxSessionNumber = Math.max(...sessions.value.map(session => {
+              const match = session.name?.match(/Session (\d+)/);
+              return match ? parseInt(match[1]) : 0;
+            }));
+            sessionCounter.value[currentProjectId.value] = maxSessionNumber + 1;
+          } catch (counterError) {
+            console.error('Error calculating session counter:', counterError);
+            sessionCounter.value[currentProjectId.value] = sessions.value.length + 1;
+          }
+          
+          console.log(`Loading first session: ${sessions.value[0].id} (${sessions.value[0].name})`);
+          // Load the first session with error handling
+          try {
+            await loadSession(sessions.value[0].id);
+            console.log('Session loaded successfully');
+          } catch (loadError) {
+            console.error('Error loading session:', loadError);
+            // Even if loading fails, ensure we have a valid state
+            currentSessionId.value = sessions.value[0].id;
+          }
+        } else {
+          console.log('Sessions array is empty, creating new session');
+          // No sessions found, create a new one
+          sessionCounter.value[currentProjectId.value] = 1;
+          const newSession = createNewSession();
+          sessions.value = [newSession];
+          try {
+            await loadSession(newSession.id);
+          } catch (loadError) {
+            console.error('Error loading new session:', loadError);
+            currentSessionId.value = newSession.id;
+          }
+        }
+      } catch (processingError) {
+        console.error('Error processing sessions:', processingError);
+        // Fallback: create a new session to ensure UI doesn't break
+        try {
+          sessionCounter.value[currentProjectId.value] = 1;
+          const newSession = createNewSession();
+          sessions.value = [newSession];
+          currentSessionId.value = newSession.id;
+        } catch (fallbackError) {
+          console.error('Critical error in fallback session creation:', fallbackError);
+        }
       }
     } else {
+      console.log(`No valid sessions data found. Type: ${typeof sessionsData}, IsArray: ${Array.isArray(sessionsData)}`);
       // No sessions found, create a new one
       sessionCounter.value[currentProjectId.value] = 1;
       const newSession = createNewSession();
@@ -642,24 +728,6 @@ const loadSessionsFromStorage = async () => {
 // Computed properties
 const hasResults = computed(() => {
   return testResults.value.length > 0 || testCases.value.some(tc => tc.result);
-});
-
-const passedTests = computed(() => {
-  const batchResults = testResults.value.filter(r => r.success).length;
-  const individualResults = testCases.value.filter(tc => tc.result && tc.result.success).length;
-  return batchResults + individualResults;
-});
-
-const failedTests = computed(() => {
-  const batchResults = testResults.value.filter(r => !r.success).length;
-  const individualResults = testCases.value.filter(tc => tc.result && !tc.result.success).length;
-  return batchResults + individualResults;
-});
-
-const totalTests = computed(() => {
-  const batchResults = testResults.value.length;
-  const individualResults = testCases.value.filter(tc => tc.result).length;
-  return batchResults + individualResults;
 });
 
 // Filtered test cases based on search query
@@ -747,16 +815,17 @@ const generateExampleValue = (schema: any, depth: number = 0, parsedSchema?: any
   switch (type) {
     case 'string':
       if (schema.enum && schema.enum.length > 0) return schema.enum[0];
-      if (schema.format === 'email') return 'user@example.com';
-      if (schema.format === 'date') return '2023-01-01';
-      if (schema.format === 'date-time') return '2023-01-01T00:00:00Z';
-      if (schema.format === 'uuid') return '123e4567-e89b-12d3-a456-426614174000';
-      return 'string';
+      if (schema.format === 'email') return defaultPlaceholders.value.email;
+      if (schema.format === 'date') return defaultPlaceholders.value.date;
+      if (schema.format === 'date-time') return defaultPlaceholders.value.dateTime;
+      if (schema.format === 'uuid') return defaultPlaceholders.value.uuid;
+      return defaultPlaceholders.value.string;
     case 'integer':
+      return defaultPlaceholders.value.integer;
     case 'number':
-      return 0;
+      return defaultPlaceholders.value.number;
     case 'boolean':
-      return true;
+      return defaultPlaceholders.value.boolean;
     case 'array':
       if (schema.items) {
         const itemValue = generateExampleValue(schema.items, depth + 1, parsedSchema);
@@ -774,7 +843,7 @@ const generateExampleValue = (schema: any, depth: number = 0, parsedSchema?: any
       }
       return {};
     default:
-      return 'string';
+      return defaultPlaceholders.value.string;
   }
 };
 
@@ -900,7 +969,80 @@ const validateSchemaLocally = (schemaText: string): { valid: boolean; errors: st
   }
 };
 
+// Parse raw endpoint line
+const parseRawEndpoint = (line: string): { method: string | null; path: string } | null => {
+  const trimmed = line.trim();
+  if (!trimmed) return null;
+  
+  // Check for method in brackets: [METHOD] /path
+  const methodMatch = trimmed.match(/^\[([A-Z]+)\]\s+(.+)$/);
+  if (methodMatch) {
+    return {
+      method: methodMatch[1].toUpperCase(),
+      path: methodMatch[2].trim()
+    };
+  }
+  
+  // Check if it starts with / (path only, no method)
+  if (trimmed.startsWith('/')) {
+    return {
+      method: null,
+      path: trimmed
+    };
+  }
+  
+  return null;
+};
 
+// Generate test cases from raw endpoints
+const generateTestCasesFromRaw = (rawText: string): any[] => {
+  const lines = rawText.split('\n');
+  const testCases: any[] = [];
+  
+  for (const line of lines) {
+    const parsed = parseRawEndpoint(line);
+    if (!parsed) continue;
+    
+    const { method, path } = parsed;
+    const pathVariables = extractPathVariables(path);
+    
+    if (method) {
+      // With method - create single test case
+      testCases.push({
+        path,
+        method: method,
+        name: `${method} ${path}`,
+        description: `Test ${method} ${path}`,
+        parameters: [],
+        requestBody: null,
+        expectedStatus: 200,
+        pathVariables,
+        bodyVariables: {},
+        originalPath: path,
+        isRaw: true,
+        hasMethod: true
+      });
+    } else {
+      // Without method - create test case without method
+      testCases.push({
+        path,
+        method: null,
+        name: path,
+        description: `Test ${path}`,
+        parameters: [],
+        requestBody: null,
+        expectedStatus: 200,
+        pathVariables,
+        bodyVariables: {},
+        originalPath: path,
+        isRaw: true,
+        hasMethod: false
+      });
+    }
+  }
+  
+  return testCases;
+};
 
 const loadSchema = async () => {
   if (!schemaText.value.trim()) {
@@ -908,6 +1050,7 @@ const loadSchema = async () => {
   }
 
   try {
+    isRawMode.value = false;
     // First validate the schema locally to avoid RPC payload size issues
     validationResult.value = validateSchemaLocally(schemaText.value);
     
@@ -930,9 +1073,11 @@ const loadSchema = async () => {
       // Initialize path variables
       const allPathVariables = new Set<string>();
       cases.forEach(testCase => {
-        if (testCase.pathVariables) {
+        if (testCase.pathVariables && Array.isArray(testCase.pathVariables)) {
           testCase.pathVariables.forEach((variable: string) => {
-            allPathVariables.add(variable);
+            if (variable && typeof variable === 'string') {
+              allPathVariables.add(variable);
+            }
           });
         }
       });
@@ -941,6 +1086,23 @@ const loadSchema = async () => {
       pathVariableValues.value = {};
       allPathVariables.forEach(variable => {
         pathVariableValues.value[variable] = [''];
+      });
+      
+      // Initialize query parameter values
+      const allQueryParameters = new Set<string>();
+      cases.forEach(testCase => {
+        if (testCase.parameters && Array.isArray(testCase.parameters)) {
+          testCase.parameters.forEach((param: any) => {
+            if (param.in === 'query' && param.name && typeof param.name === 'string') {
+              allQueryParameters.add(param.name);
+            }
+          });
+        }
+      });
+      
+      queryParameterValues.value = {};
+      allQueryParameters.forEach(param => {
+        queryParameterValues.value[param] = [''];
       });
       
       // Initialize body variable values
@@ -993,6 +1155,67 @@ const loadSchema = async () => {
   } catch (error) {
     console.error("Failed to load schema:", error);
     validationResult.value = { valid: false, errors: [error instanceof Error ? error.message : "Failed to load schema"] };
+  }
+};
+
+const loadRawEndpoints = async () => {
+  if (!rawEndpoints.value.trim()) {
+    return;
+  }
+
+  try {
+    isRawMode.value = true;
+    parsedSchema.value = null; // No schema in raw mode
+    
+    // Generate test cases from raw endpoints
+    const cases = generateTestCasesFromRaw(rawEndpoints.value);
+    testCases.value = cases;
+    isSchemaLoaded.value = true;
+    activeTab.value = 1; // Switch to test cases tab
+    
+    // Auto-save session after loading raw endpoints
+    await saveCurrentSession();
+    
+    // Initialize path variables
+    const allPathVariables = new Set<string>();
+    cases.forEach(testCase => {
+      if (testCase.pathVariables && Array.isArray(testCase.pathVariables)) {
+        testCase.pathVariables.forEach((variable: string) => {
+          if (variable && typeof variable === 'string') {
+            allPathVariables.add(variable);
+          }
+        });
+      }
+    });
+    
+    // Initialize path variable values
+    pathVariableValues.value = {};
+    allPathVariables.forEach(variable => {
+      pathVariableValues.value[variable] = [''];
+    });
+    
+    // No query parameters or body variables in raw mode
+    queryParameterValues.value = {};
+    bodyVariableValues.value = {};
+    
+    // Initialize test case specific variable values
+    testCasePathVariableValues.value = {};
+    testCaseQueryParameterValues.value = {};
+    testCaseBodyVariableValues.value = {};
+    
+    cases.forEach(testCase => {
+      const testCaseId = getTestCaseId(testCase);
+      
+      // Initialize path variables
+      if (testCase.pathVariables) {
+        testCasePathVariableValues.value[testCaseId] = {};
+        testCase.pathVariables.forEach((variable: string) => {
+          testCasePathVariableValues.value[testCaseId][variable] = '';
+        });
+      }
+    });
+  } catch (error) {
+    console.error("Failed to load raw endpoints:", error);
   }
 };
 
@@ -1222,6 +1445,131 @@ const runSingleTest = async (testCase: any) => {
     resetStopFlag(); // Reset stop flag when single test completes
     // Save session after test completes
     await saveCurrentSession();
+  }
+};
+
+const runAllMethods = async (testCase: any) => {
+  if (!baseUrl.value.trim()) {
+    return;
+  }
+
+  // Define all HTTP methods to test
+  // "All Methods" should test all methods on the selected endpoint, even if no method is specified
+  const allMethods = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS', 'CONNECT', 'TRACE'];
+  
+  // Filter out DELETE if not allowed
+  const methodsToTest = allowDeleteInAllMethods.value 
+    ? allMethods 
+    : allMethods.filter(m => m !== 'DELETE');
+
+  // Mark all methods as running
+  methodsToTest.forEach(method => {
+    const testName = `${method} ${testCase.path}`;
+    runningTests.value.add(testName);
+  });
+
+  try {
+    const options = {
+      workers: 1,
+      delayBetweenRequests: 0,
+      timeout: timeout.value,
+      headers: parseCustomHeaders(),
+      useParameterFromDefinition: useParameterFromDefinition.value
+    };
+
+    // Run each method using the CURRENT test case's variable values
+    // This ensures all methods are tested with the same variable values
+    // and doesn't affect other test cases on the same endpoint with different values
+    for (const method of methodsToTest) {
+      if (stopTestRequested.value) break;
+
+      // Always create a new test case entry for this method using the current test case's values
+      // Use a unique name to avoid conflicts with existing test cases
+      const originalTestCaseId = getTestCaseId(testCase);
+      const methodTestCase = {
+        ...testCase,
+        method: method,
+        name: `${method} ${testCase.path} [${originalTestCaseId}]`,
+        originalMethod: testCase.method, // Keep original for reference
+        originalTestCaseId: originalTestCaseId // Track which test case triggered this
+      };
+
+      // Get body and query variables from the ORIGINAL test case (current endpoint's values)
+      // This ensures all methods use the same variable values
+      const bodyVars = getTestCaseBodyVariables(testCase);
+      const queryVars = getTestCaseQueryParameters(testCase);
+      
+      // Get path variables from the original test case
+      const pathVars: Record<string, string> = {};
+      const testCaseId = getTestCaseId(testCase);
+      if (testCase.pathVariables) {
+        testCase.pathVariables.forEach((variable: string) => {
+          // Use test case specific values if available, otherwise use global values
+          const testCaseValues = testCasePathVariableValues.value[testCaseId]?.[variable];
+          if (testCaseValues !== undefined && testCaseValues !== '') {
+            pathVars[variable] = testCaseValues;
+          } else if (pathVariableValues.value[variable] && pathVariableValues.value[variable].length > 0) {
+            pathVars[variable] = pathVariableValues.value[variable][0];
+          }
+        });
+      }
+
+      // Run the test
+      const result = await sdk.backend.runSingleTest(
+        toMinimalTestCase(methodTestCase),
+        baseUrl.value,
+        options,
+        pathVars,
+        bodyVars,
+        queryVars
+      );
+
+      // For raw endpoints, don't create new test case entries - just store results directly
+      if (testCase.isRaw) {
+        // Add result directly to testResults without creating new test cases
+        const testResult = {
+          ...result,
+          testCase: {
+            path: methodTestCase.path,
+            method: methodTestCase.method,
+            name: methodTestCase.name
+          },
+          timestamp: new Date().toISOString()
+        };
+        testResults.value.push(testResult);
+      } else {
+        // For regular schema endpoints, create/update test case entries
+        // Check if this test case already exists (by name)
+        const existingIndex = testCases.value.findIndex(tc => tc.name === methodTestCase.name);
+        if (existingIndex === -1) {
+          // Add new test case
+          testCases.value.push(methodTestCase);
+        } else {
+          // Update existing test case
+          methodTestCase.name = testCases.value[existingIndex].name; // Keep original name
+          testCases.value[existingIndex] = methodTestCase;
+        }
+
+        // Update the test case result
+        updateTestCaseResult(methodTestCase, result);
+      }
+
+      // Add delay between requests if specified
+      if (delayBetweenRequests.value > 0 && methodsToTest.indexOf(method) < methodsToTest.length - 1) {
+        await new Promise(resolve => setTimeout(resolve, delayBetweenRequests.value));
+      }
+    }
+
+    // Save session after all methods are tested
+    await saveCurrentSession();
+  } catch (error) {
+    console.error("All methods test execution failed:", error);
+  } finally {
+    // Remove all method test names from running tests
+    methodsToTest.forEach(method => {
+      const testName = `${method} ${testCase.path}`;
+      runningTests.value.delete(testName);
+    });
   }
 };
 
@@ -1663,16 +2011,28 @@ const formatRequestForCaido = (testResult: any): string => {
 };
 
 const formatResponseForCaido = (testResult: any): string => {
-  const { status, response, error } = testResult;
+  const { status, response, error, responseHeaders, responseRaw } = testResult;
   
-  let responseText = `HTTP/1.1 ${status}\r\n`;
-  responseText += `Content-Type: application/json\r\n`;
-  responseText += `Content-Length: ${getResponseLength(response)}\r\n`;
-  responseText += `Date: ${new Date().toUTCString()}\r\n`;
-  responseText += `Server: nginx/1.18.0\r\n`;
-  responseText += `Access-Control-Allow-Origin: *\r\n`;
-  responseText += `Access-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS\r\n`;
-  responseText += `Access-Control-Allow-Headers: Content-Type, Authorization\r\n`;
+  // If we have raw response text, use it directly (includes headers)
+  if (responseRaw) {
+    return responseRaw;
+  }
+  
+  // Otherwise, construct from available data
+  let responseText = `HTTP/1.1 ${status}${status === 404 ? ' Not Found' : status === 200 ? ' OK' : ''}\r\n`;
+  
+  // Use actual response headers if available
+  if (responseHeaders && Object.keys(responseHeaders).length > 0) {
+    Object.entries(responseHeaders).forEach(([key, value]) => {
+      responseText += `${key}: ${value}\r\n`;
+    });
+  } else {
+    // Fallback to default headers only if no actual headers are available
+    responseText += `Content-Type: ${typeof response === 'object' ? 'application/json' : 'text/html; charset=UTF-8'}\r\n`;
+    responseText += `Content-Length: ${getResponseLength(response)}\r\n`;
+    responseText += `Date: ${new Date().toUTCString()}\r\n`;
+  }
+  
   responseText += '\r\n';
   
   if (error) {
@@ -1690,8 +2050,6 @@ const formatResponseForCaido = (testResult: any): string => {
   return responseText;
 };
 
-
-
 const getTestStatus = (testCase: any) => {
   if (!testCase.result) return null;
   return {
@@ -1702,16 +2060,12 @@ const getTestStatus = (testCase: any) => {
   };
 };
 
-const hasPathVariables = (testCase: any) => {
-  return testCase.pathVariables && testCase.pathVariables.length > 0;
-};
-
 const getPathVariableValue = (variable: string) => {
   return pathVariableValues.value[variable] || [''];
 };
 
-const setPathVariableValue = (variable: string, values: string[]) => {
-  pathVariableValues.value[variable] = values;
+const getQueryParameterValue = (param: string) => {
+  return queryParameterValues.value[param] || [''];
 };
 
 const addPathVariableValue = (variable: string) => {
@@ -1719,6 +2073,35 @@ const addPathVariableValue = (variable: string) => {
     pathVariableValues.value[variable] = [''];
   } else {
     pathVariableValues.value[variable].push('');
+  }
+};
+
+const addQueryParameterValue = (param: string) => {
+  if (!queryParameterValues.value[param]) {
+    queryParameterValues.value[param] = [''];
+  } else {
+    queryParameterValues.value[param].push('');
+  }
+};
+
+const removeQueryParameterValue = (param: string, index: number) => {
+  if (queryParameterValues.value[param] && queryParameterValues.value[param].length > 1) {
+    queryParameterValues.value[param].splice(index, 1);
+  }
+};
+
+const handleQueryParameterPaste = (param: string, event: ClipboardEvent) => {
+  const pastedText = event.clipboardData?.getData('text') || '';
+  const lines = parseMultiLineInput(pastedText);
+  
+  if (lines.length > 1) {
+    event.preventDefault();
+    
+    if (!queryParameterValues.value[param]) {
+      queryParameterValues.value[param] = [];
+    }
+    
+    queryParameterValues.value[param].push(...lines);
   }
 };
 
@@ -1791,20 +2174,45 @@ const removePathVariableValue = (variable: string, index: number) => {
 };
 
 const isTestRunning = (testCase: any) => {
-  return runningTests.value.has(testCase.name);
+  // Check if this specific test case is running
+  if (runningTests.value.has(testCase.name)) {
+    return true;
+  }
+  // Also check if any method variant of this path is running (for "All Methods" button)
+  const allMethods = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS', 'CONNECT', 'TRACE'];
+  return allMethods.some(method => {
+    const testName = `${method} ${testCase.path}`;
+    return runningTests.value.has(testName);
+  });
 };
 
 
 const getUniquePathVariables = () => {
   const variables = new Set<string>();
   testCases.value.forEach(testCase => {
-    if (testCase.pathVariables) {
+    if (testCase.pathVariables && Array.isArray(testCase.pathVariables)) {
       testCase.pathVariables.forEach((variable: string) => {
-        variables.add(variable);
+        if (variable && typeof variable === 'string') {
+          variables.add(variable);
+        }
       });
     }
   });
   return Array.from(variables).sort((a, b) => a.localeCompare(b));
+};
+
+const getUniqueQueryParameters = () => {
+  const params = new Set<string>();
+  testCases.value.forEach(testCase => {
+    if (testCase.parameters && Array.isArray(testCase.parameters)) {
+      testCase.parameters.forEach((param: any) => {
+        if (param.in === 'query' && param.name && typeof param.name === 'string') {
+          params.add(param.name);
+        }
+      });
+    }
+  });
+  return Array.from(params).sort((a, b) => a.localeCompare(b));
 };
 
 
@@ -1839,39 +2247,11 @@ const isTestCaseExpanded = (testCase: any) => {
 
 // Functions to get variable values with sidebar override
 const getTestCaseId = (testCase: any) => {
-  return `${testCase.method}-${testCase.path}`;
+  // Handle null/undefined methods for raw endpoints
+  const method = testCase.method || 'NO_METHOD';
+  return `${method}-${testCase.path}`;
 };
 
-const getTestCasePathVariableValue = (testCase: any, variable: string) => {
-  const testCaseId = getTestCaseId(testCase);
-  // Test case specific values are primary, sidebar values are fallback
-  const testCaseValue = testCasePathVariableValues.value[testCaseId]?.[variable] || '';
-  if (testCaseValue.trim() !== '') {
-    return testCaseValue;
-  }
-  // Return sidebar value as fallback
-  return pathVariableValues.value[variable]?.[0] || '';
-};
-
-const getTestCaseQueryParameterValue = (testCase: any, paramName: string) => {
-  const testCaseId = getTestCaseId(testCase);
-  return testCaseQueryParameterValues.value[testCaseId]?.[paramName] || '';
-};
-
-const getTestCaseBodyVariableValue = (testCase: any, key: string) => {
-  const testCaseId = getTestCaseId(testCase);
-  // Test case specific values are primary, sidebar values are fallback
-  const testCaseValue = testCaseBodyVariableValues.value[testCaseId]?.[key];
-  if (testCaseValue !== undefined && testCaseValue !== '') {
-    return testCaseValue;
-  }
-  // Return sidebar value as fallback (first value from array)
-  if (bodyVariableValues.value[key] && bodyVariableValues.value[key].length > 0) {
-    return bodyVariableValues.value[key][0];
-  }
-  // Return default value from test case
-  return testCase.bodyVariables[key] || '';
-};
 
 const getTestCaseBodyVariables = (testCase: any) => {
   const testCaseId = getTestCaseId(testCase);
@@ -1981,6 +2361,21 @@ const getTestCaseQueryParameters = (testCase: any) => {
     });
   }
   
+  // Override with global query parameter values (sidebar values) as fallback
+  if (testCase.parameters) {
+    testCase.parameters.forEach((param: any) => {
+      if (param.in === 'query' && param.name) {
+        // Check global query parameter values if test case specific value is not set
+        if (!testCaseQueryParameterValues.value[testCaseId]?.[param.name]) {
+          const globalValues = queryParameterValues.value[param.name];
+          if (globalValues && globalValues.length > 0 && globalValues[0].trim() !== '') {
+            queryVars[param.name] = globalValues[0];
+          }
+        }
+      }
+    });
+  }
+  
   // Override with test case specific values (highest priority)
   if (testCaseQueryParameterValues.value[testCaseId]) {
     Object.entries(testCaseQueryParameterValues.value[testCaseId]).forEach(([key, value]) => {
@@ -2047,109 +2442,7 @@ const resetStopFlag = () => {
   stopTestRequested.value = false;
 };
 
-const runHttpqlQuery = async () => {
-  if (!httpqlQuery.value.trim()) {
-    return;
-  }
 
-  isHttpqlRunning.value = true;
-  httpqlResults.value = "";
-
-  try {
-    // Try to use GraphQL to query HTTP data (alternative to HTTPQL)
-    if (sdk.graphql && typeof sdk.graphql.query === 'function') {
-      try {
-        // Try to query HTTP history data using GraphQL
-        const query = `
-          query {
-            httpHistory {
-              requests {
-                id
-                method
-                url
-                statusCode
-                responseTime
-                timestamp
-              }
-            }
-          }
-        `;
-        const result = await sdk.graphql.query(query);
-        httpqlResults.value = JSON.stringify(result, null, 2);
-      } catch (graphqlError) {
-        // If GraphQL doesn't work, try to filter the results based on the HTTPQL-like query
-        await filterTestResultsByQuery();
-      }
-    } else {
-      // Fallback: filter test results based on the query
-      await filterTestResultsByQuery();
-    }
-  } catch (error) {
-    httpqlResults.value = `Error running query: ${error instanceof Error ? error.message : String(error)}\n\nQuery: ${httpqlQuery.value}`;
-  } finally {
-    isHttpqlRunning.value = false;
-  }
-}; 
-
-const filterTestResultsByQuery = async () => {
-  const query = httpqlQuery.value.toLowerCase();
-  
-  // Simple query parser for common HTTPQL-like patterns
-  if (query.includes('resp.code') || query.includes('status')) {
-    // Filter by status code
-    const statusMatch = query.match(/(?:resp\.code|status)\s*\.?\s*(?:eq|==|=)?\s*:?\s*(\d+)/);
-    if (statusMatch) {
-      const targetStatus = parseInt(statusMatch[1]);
-      const filteredResults = allTestResults.value.filter(result => result.status === targetStatus);
-      filteredTestResults.value = filteredResults;
-      isQueryActive.value = true;
-      httpqlResults.value = `Filtered results for status code ${targetStatus} (${filteredResults.length} results)`;
-    } else {
-      httpqlResults.value = `Query pattern recognized but no status code found.\n\nQuery: ${httpqlQuery.value}\n\nTry: resp.code.eq:200 or status:200`;
-      isQueryActive.value = false;
-    }
-  } else if (query.includes('method')) {
-    // Filter by HTTP method
-    const methodMatch = query.match(/method\s*\.?\s*(?:eq|==|=)?\s*:?\s*(get|post|put|delete|patch)/i);
-    if (methodMatch) {
-      const targetMethod = methodMatch[1].toUpperCase();
-      const filteredResults = allTestResults.value.filter(result => result.testCase.method === targetMethod);
-      filteredTestResults.value = filteredResults;
-      isQueryActive.value = true;
-      httpqlResults.value = `Filtered results for method ${targetMethod} (${filteredResults.length} results)`;
-    } else {
-      httpqlResults.value = `Query pattern recognized but no method found.\n\nQuery: ${httpqlQuery.value}\n\nTry: method.eq:GET or method:POST`;
-      isQueryActive.value = false;
-    }
-  } else if (query.includes('url') || query.includes('path')) {
-    // Filter by URL/path
-    const urlMatch = query.match(/(?:url|path)\s*\.?\s*(?:eq|==|=)?\s*:?\s*["']?([^"']+)["']?/);
-    if (urlMatch) {
-      const targetPath = urlMatch[1];
-      const filteredResults = allTestResults.value.filter(result => 
-        result.testCase.path.toLowerCase().includes(targetPath.toLowerCase())
-      );
-      filteredTestResults.value = filteredResults;
-      isQueryActive.value = true;
-      httpqlResults.value = `Filtered results for path containing "${targetPath}" (${filteredResults.length} results)`;
-    } else {
-      httpqlResults.value = `Query pattern recognized but no path found.\n\nQuery: ${httpqlQuery.value}\n\nTry: url.eq:"/users" or path:"/api"`;
-      isQueryActive.value = false;
-    }
-  } else {
-    // Show all results if no specific filter is applied
-    filteredTestResults.value = allTestResults.value;
-    isQueryActive.value = true;
-    httpqlResults.value = `Showing all test results (${allTestResults.value.length} results)`;
-  }
-};
-
-const clearQuery = () => {
-  httpqlQuery.value = "";
-  httpqlResults.value = "";
-  filteredTestResults.value = [];
-  isQueryActive.value = false;
-};
 
 const clearAllResults = () => {
   testResults.value = [];
@@ -2317,13 +2610,6 @@ const setupKeyboardShortcuts = () => {
     const isInEditor = target.closest('.request-editor-container') || target.closest('.response-editor-container');
     
     if (!isInEditor) return; // Only work when clicking on editors
-    
-    // Ctrl+R or Cmd+R to send to Repeater
-    if ((event.ctrlKey || event.metaKey) && event.key === 'r' && !event.shiftKey) {
-      event.preventDefault();
-      sendToRepeater();
-    }
-    
     // Ctrl+Shift+R or Cmd+Shift+R to send to Replay
     if ((event.ctrlKey || event.metaKey) && event.key === 'R' && event.shiftKey) {
       event.preventDefault();
@@ -2471,7 +2757,7 @@ watch([allTestResults, testResults, filteredTestResults], () => {
 
 // Save session whenever key values change (with debounce to avoid too many saves)
 let saveTimeout: ReturnType<typeof setTimeout> | null = null;
-watch([schemaText, baseUrl, workers, delayBetweenRequests, timeout, useRandomValues, useParameterFromDefinition, pathVariableValues, bodyVariableValues, customHeaders, testCases, testResults], () => {
+watch([schemaText, baseUrl, workers, delayBetweenRequests, timeout, useRandomValues, useParameterFromDefinition, pathVariableValues, queryParameterValues, bodyVariableValues, customHeaders, testCases, testResults], () => {
   if (saveTimeout) clearTimeout(saveTimeout);
   saveTimeout = setTimeout(async () => {
     await saveCurrentSession();
@@ -2482,14 +2768,16 @@ watch([schemaText, baseUrl, workers, delayBetweenRequests, timeout, useRandomVal
 let projectChangeHandler: { stop: () => void } | null = null;
 
 onMounted(async () => {
+  // Check migration status on mount
+  await checkMigrationStatus();
+  
   // Handle project change
   const handleProjectChange = async (event: { projectId: string | undefined }) => {
     try {
       console.log('Project change event received, projectId:', event.projectId);
       
       // FIRST: Check if openapi environment variable is available for the new project
-      // This is the key we use to store sessions in the database
-      // NEVER use project ID (UUID) as a fallback - always use 'default' if env var doesn't exist
+      // If not available, use project ID from the event as the session key
       let newProjectKey: string;
       try {
         const openapiValue = await sdk.env.getVar('openapi');
@@ -2497,15 +2785,26 @@ onMounted(async () => {
           console.log(`Found 'openapi' env var for new project: ${openapiValue}`);
           newProjectKey = openapiValue;
         } else {
-          // If no env var, use 'default' - DO NOT use project ID to avoid creating random keys
-          newProjectKey = 'default';
-          console.log(`No 'openapi' env var found, using 'default' key`);
+          // If no env var, use project ID from event as fallback
+          if (event.projectId) {
+            newProjectKey = event.projectId;
+            console.log(`No 'openapi' env var found, using project ID as key: ${event.projectId}`);
+          } else {
+            // Last resort: use 'default' if no project ID available
+            newProjectKey = 'default';
+            console.log(`No 'openapi' env var and no project ID, using 'default' key`);
+          }
         }
       } catch (error) {
         console.warn('Failed to get openapi env var:', error);
-        // Always fall back to 'default', never use project ID
-        newProjectKey = 'default';
-        console.log(`Using 'default' as fallback`);
+        // Fall back to project ID from event if available
+        if (event.projectId) {
+          newProjectKey = event.projectId;
+          console.log(`Using project ID as fallback: ${event.projectId}`);
+        } else {
+          newProjectKey = 'default';
+          console.log(`Using 'default' as fallback`);
+        }
       }
       
       if (newProjectKey !== currentProjectId.value) {
@@ -2542,21 +2841,49 @@ onMounted(async () => {
   // Set up project change listener FIRST, so we can get the initial project ID
   projectChangeHandler = sdk.projects.onCurrentProjectChange(handleProjectChange);
   
-  // Initialize with current project
-  // Try to get project key - the project change event should fire immediately with current project ID
-  // But we'll also try env var as fallback
-  const initialProjectKey = await getProjectKey();
-  currentProjectId.value = initialProjectKey;
-  
-  // Wait a bit for the project change event to fire (if it hasn't already)
-  // This ensures we get the actual project ID from the event
+  // Wait for the project change event to fire to get the initial project ID
+  // This ensures we have the actual project ID from the event
   await new Promise(resolve => setTimeout(resolve, 100));
   
-  // Load sessions from storage (using the project ID from the event if it fired)
-  await loadSessionsFromStorage();
+  // If currentProjectId is still not set (event didn't fire or didn't have projectId),
+  // try to get project key using getProjectKey (which checks openapi env var first)
+  if (!currentProjectId.value || currentProjectId.value === 'default') {
+    const initialProjectKey = await getProjectKey();
+    currentProjectId.value = initialProjectKey;
+  }
+  
+  // Load global settings first
+  try {
+    await loadGlobalSettings();
+  } catch (error) {
+    console.error('Error loading global settings:', error);
+    // Continue anyway
+  }
+  
+  // Load sessions from storage (using the project key determined above)
+  try {
+    await loadSessionsFromStorage();
+  } catch (error) {
+    console.error('Error loading sessions from storage:', error);
+    // Ensure we have at least one session to prevent UI from breaking
+    if (!sessions.value || sessions.value.length === 0) {
+      try {
+        const newSession = createNewSession();
+        sessions.value = [newSession];
+        currentSessionId.value = newSession.id;
+      } catch (fallbackError) {
+        console.error('Critical error creating fallback session:', fallbackError);
+      }
+    }
+  }
   
   // Then load results (this will be session-specific)
-  loadResultsFromStorage();
+  try {
+    loadResultsFromStorage();
+  } catch (error) {
+    console.error('Error loading results from storage:', error);
+    // Continue anyway
+  }
   
   // Set up auto-save functionality
   const autoSaveInterval = setInterval(async () => {
@@ -2589,6 +2916,339 @@ onMounted(async () => {
   });
 });
 
+
+//###################################
+// debug db
+//###################################
+const showDatabaseContents = async () => {
+  try {
+   await sdk.backend.logDatabaseContents();
+  } catch (error) {
+    console.error('Error showing database contents:', error);
+  }
+};
+
+//###################################
+// Global Settings Management
+//###################################
+const loadGlobalSettings = async () => {
+  try {
+    const result = await sdk.backend.loadGlobalSettingsFromDb();
+    if (result.kind === "Ok") {
+      const settings = result.value;
+      if (settings.workers !== undefined) workers.value = settings.workers;
+      if (settings.delayBetweenRequests !== undefined) delayBetweenRequests.value = settings.delayBetweenRequests;
+      if (settings.timeout !== undefined) timeout.value = settings.timeout;
+      if (settings.allowDeleteInAllMethods !== undefined) allowDeleteInAllMethods.value = settings.allowDeleteInAllMethods;
+      if (settings.defaultPlaceholders) {
+        defaultPlaceholders.value = { ...defaultPlaceholders.value, ...settings.defaultPlaceholders };
+      }
+    }
+  } catch (error) {
+    console.error('Failed to load global settings:', error);
+  }
+};
+
+const saveGlobalSettings = async () => {
+  try {
+    const settings = {
+      workers: workers.value,
+      delayBetweenRequests: delayBetweenRequests.value,
+      timeout: timeout.value,
+      allowDeleteInAllMethods: allowDeleteInAllMethods.value,
+      defaultPlaceholders: defaultPlaceholders.value
+    };
+    const result = await sdk.backend.saveGlobalSettingsToDb(settings);
+    if (result.kind === "Error") {
+      console.error('Failed to save global settings:', result.error);
+    }
+  } catch (error) {
+    console.error('Failed to save global settings:', error);
+  }
+};
+
+const updatePlaceholder = (key: string, value: any) => {
+  if (key in defaultPlaceholders.value) {
+    (defaultPlaceholders.value as any)[key] = value;
+    saveGlobalSettings();
+  }
+};
+
+const resetPlaceholders = () => {
+  defaultPlaceholders.value = {
+    string: 'string',
+    integer: 0,
+    number: 0,
+    boolean: true,
+    email: 'user@example.com',
+    date: '2023-01-01',
+    dateTime: '2023-01-01T00:00:00Z',
+    uuid: '123e4567-e89b-12d3-a456-426614174000'
+  };
+  saveGlobalSettings();
+};
+
+
+//###################################
+// Global Settings Management
+//###################################
+
+
+//###################################
+// debug db
+//###################################
+
+//###################################
+// Migration function
+//###################################
+const migrateLocalStorageToDb = async () => {
+  try {
+    const sessionsData: Record<string, any[]> = {};
+    let testResultsData: any = null;
+    const migratedProjectKeys: string[] = [];
+    
+    // Collect all session data from localStorage
+    try {
+      for (let i = 0; i < localStorage.length; i++) {
+        const key = localStorage.key(i);
+        if (key && key.startsWith('openapi-sessions-')) {
+          const value = localStorage.getItem(key);
+          if (value) {
+            try {
+              const parsed = JSON.parse(value);
+              if (Array.isArray(parsed) && parsed.length > 0) {
+                sessionsData[key] = parsed;
+                // Extract project key from localStorage key (format: openapi-sessions-{projectKey})
+                const projectKey = key.replace('openapi-sessions-', '');
+                if (projectKey && !migratedProjectKeys.includes(projectKey)) {
+                  migratedProjectKeys.push(projectKey);
+                }
+              }
+            } catch (parseError) {
+              console.error(`Failed to parse localStorage key ${key}:`, parseError);
+            }
+          }
+        }
+      }
+    } catch (error) {
+      console.error('Error reading sessions from localStorage:', error);
+    }
+    
+    // Get test results from localStorage
+    try {
+      const testResultsStr = localStorage.getItem('openapi-testing-results');
+      if (testResultsStr) {
+        testResultsData = JSON.parse(testResultsStr);
+      }
+    } catch (error) {
+      console.error('Error reading test results from localStorage:', error);
+    }
+    
+    // Migrate to database (no environment variable migration needed)
+    const result = await sdk.backend.migrateFromLocalStorage({
+      sessions: sessionsData,
+      testResults: testResultsData
+    });
+    
+    if (result.kind === "Ok") {
+      console.log(`Migration successful: ${result.value.sessionsMigrated} sessions, test results: ${result.value.testResultsMigrated ? 'yes' : 'no'}`);
+      console.log(`Migrated project keys: ${migratedProjectKeys.join(', ')}`);
+      
+      // After migration, try to load sessions using the current project key logic
+      // If that fails, try loading from the first migrated project key
+      let loaded = false;
+      
+      try {
+        await loadSessionsFromStorage();
+        // Check if we actually loaded any sessions
+        if (sessions.value && sessions.value.length > 0) {
+          loaded = true;
+          console.log('Successfully loaded sessions after migration using current project key');
+        }
+      } catch (loadError) {
+        console.error('Failed to load sessions with current project key:', loadError);
+      }
+      
+      // If we didn't load any sessions, try loading from the first migrated project key
+      if (!loaded && migratedProjectKeys.length > 0) {
+        console.log(`Trying to load sessions from first migrated project key: ${migratedProjectKeys[0]}`);
+        try {
+          const loadResult = await sdk.backend.loadSessionsFromDb(migratedProjectKeys[0]);
+          if (loadResult.kind === "Ok" && loadResult.value && Array.isArray(loadResult.value) && loadResult.value.length > 0) {
+            // Update currentProjectId to match the migrated project key
+            currentProjectId.value = migratedProjectKeys[0];
+            // Load the sessions
+            sessions.value = loadResult.value.map(session => ({
+              ...session,
+              expandedResults: new Set(session.expandedResults || []),
+              expandedTestCases: new Set(session.expandedTestCases || [])
+            }));
+            // Load the first session
+            if (sessions.value.length > 0) {
+              await loadSession(sessions.value[0].id);
+              loaded = true;
+              console.log(`Successfully loaded ${sessions.value.length} sessions from migrated project key: ${migratedProjectKeys[0]}`);
+            }
+          }
+        } catch (fallbackError) {
+          console.error('Failed to load sessions from migrated project key:', fallbackError);
+        }
+      }
+      
+      // If still no sessions loaded, create a new one
+      if (!loaded) {
+        console.log('No sessions found after migration, creating new session');
+        const newSession = createNewSession();
+        sessions.value = [newSession];
+        await loadSession(newSession.id);
+      }
+      
+      // Reload test results from database after migration
+      await loadResultsFromStorage();
+      
+      // Update migration status check - hide the button now
+      await checkMigrationStatus();
+      
+      alert(`Migration complete!\n${result.value.sessionsMigrated} sessions migrated\nTest results: ${result.value.testResultsMigrated ? 'Migrated' : 'Not found'}`);
+    } else {
+      console.error('Migration failed:', result.error);
+      alert(`Migration failed: ${result.error}`);
+    }
+  } catch (error) {
+    console.error('Migration error:', error);
+    alert(`Migration error: ${error instanceof Error ? error.message : String(error)}`);
+    // Even if migration fails, try to ensure UI doesn't break
+    try {
+      await loadSessionsFromStorage();
+    } catch (loadError) {
+      console.error('Failed to reload sessions after migration error:', loadError);
+      // Create a new session as last resort
+      const newSession = createNewSession();
+      sessions.value = [newSession];
+      await loadSession(newSession.id);
+    }
+  }
+};
+
+// Check if localStorage has data to migrate
+const hasLocalStorageData = ref(false);
+
+// Check migration status on mount
+const checkMigrationStatus = async () => {
+  try {
+    console.log('Checking migration status...');
+    
+    // Check if the function exists and is callable (in case extension needs reload)
+    // Use try-catch to safely check if the function exists
+    let hasMigrationFunction = false;
+    try {
+      // Use optional chaining and safe property access
+      if (sdk?.backend && 'isMigrationCompleted' in sdk.backend) {
+        const func = (sdk.backend as any).isMigrationCompleted;
+        hasMigrationFunction = typeof func === 'function';
+      }
+    } catch (checkError) {
+      console.warn('Error checking if isMigrationCompleted exists:', checkError);
+      hasMigrationFunction = false;
+    }
+    
+    if (!hasMigrationFunction) {
+      console.warn('isMigrationCompleted function not available, using workaround');
+      // Workaround: Check if sessions exist in database (if they do, migration likely completed)
+      try {
+        // Try to get project keys - if this works and we have sessions in DB, migration likely done
+        if (sdk.backend.getAllSessionProjectKeys && typeof sdk.backend.getAllSessionProjectKeys === 'function') {
+          const keysResult = await sdk.backend.getAllSessionProjectKeys();
+          if (keysResult.kind === "Ok" && keysResult.value && keysResult.value.length > 0) {
+            // We have sessions in database, check if we can load them
+            // If we can load sessions, assume migration was done
+            const projectKey = await getProjectKey();
+            if (sdk.backend.loadSessionsFromDb && typeof sdk.backend.loadSessionsFromDb === 'function') {
+              const sessionsResult = await sdk.backend.loadSessionsFromDb(projectKey);
+              if (sessionsResult.kind === "Ok" && sessionsResult.value && sessionsResult.value.length > 0) {
+                console.log('Found sessions in database, assuming migration completed');
+                hasLocalStorageData.value = false;
+                return;
+              }
+            }
+          }
+        }
+        // No sessions in DB, check localStorage
+        const hasData = localStorage.getItem('openapi-testing-results') !== null;
+        hasLocalStorageData.value = hasData;
+        return;
+      } catch (workaroundError) {
+        console.error('Workaround check failed:', workaroundError);
+        // Final fallback: check localStorage only
+        try {
+          const hasData = localStorage.getItem('openapi-testing-results') !== null;
+          hasLocalStorageData.value = hasData;
+        } catch {
+          hasLocalStorageData.value = false;
+        }
+        return;
+      }
+    }
+    
+    // Function is available, use it
+    try {
+      const migrationCheck = await sdk.backend.isMigrationCompleted();
+      console.log('Migration check result:', migrationCheck);
+      
+      if (migrationCheck.kind === "Ok" && migrationCheck.value === true) {
+        // Migration already done, don't show button even if localStorage has data
+        console.log('Migration already completed, hiding button');
+        hasLocalStorageData.value = false;
+        return;
+      }
+      
+      // Migration not done, check if localStorage has data
+      try {
+        const hasData = localStorage.getItem('openapi-testing-results') !== null;
+        console.log('Migration not completed, localStorage has data:', hasData);
+        hasLocalStorageData.value = hasData;
+      } catch {
+        hasLocalStorageData.value = false;
+      }
+    } catch (funcError) {
+      console.error('Error calling isMigrationCompleted:', funcError);
+      // Fallback to workaround
+      try {
+        if (sdk.backend.getAllSessionProjectKeys && typeof sdk.backend.getAllSessionProjectKeys === 'function') {
+          const keysResult = await sdk.backend.getAllSessionProjectKeys();
+          if (keysResult.kind === "Ok" && keysResult.value && keysResult.value.length > 0) {
+            const projectKey = await getProjectKey();
+            if (sdk.backend.loadSessionsFromDb && typeof sdk.backend.loadSessionsFromDb === 'function') {
+              const sessionsResult = await sdk.backend.loadSessionsFromDb(projectKey);
+              if (sessionsResult.kind === "Ok" && sessionsResult.value && sessionsResult.value.length > 0) {
+                console.log('Found sessions in database, assuming migration completed');
+                hasLocalStorageData.value = false;
+                return;
+              }
+            }
+          }
+        }
+        const hasData = localStorage.getItem('openapi-testing-results') !== null;
+        hasLocalStorageData.value = hasData;
+      } catch {
+        hasLocalStorageData.value = false;
+      }
+    }
+  } catch (error) {
+    console.error('Failed to check migration status:', error);
+    // Final fallback: check localStorage directly
+    try {
+      const hasData = localStorage.getItem('openapi-testing-results') !== null;
+      hasLocalStorageData.value = hasData;
+    } catch {
+      hasLocalStorageData.value = false;
+    }
+  }
+};
+
+//###################################
+// Migration function
+//###################################
 
 </script>
 
@@ -2623,8 +3283,11 @@ onMounted(async () => {
         <button v-if="hasLocalStorageData" @click="migrateLocalStorageToDb" class="inline-flex items-center gap-2 px-3 py-2 text-sm font-medium text-white bg-green-600 hover:bg-green-700 rounded-md border border-green-700 hover:border-green-800 transition-colors duration-200 cursor-pointer" title="Migrate data from localStorage to database">
           <i class="pi pi-database text-sm"></i>Migrate to DB
         </button>
-        <button @click="showDatabaseContents" class="inline-flex items-center gap-2 px-3 py-2 text-sm font-medium text-blue-600 hover:text-blue-700 bg-blue-50 dark:bg-blue-900/20 hover:bg-blue-100 dark:hover:bg-blue-900/30 rounded-md border border-blue-200 dark:border-blue-800 hover:border-blue-300 dark:hover:border-blue-700 transition-colors duration-200 cursor-pointer" title="Show database contents in Caido console">
+        <!-- <button @click="showDatabaseContents" class="inline-flex items-center gap-2 px-3 py-2 text-sm font-medium text-blue-600 hover:text-blue-700 bg-blue-50 dark:bg-blue-900/20 hover:bg-blue-100 dark:hover:bg-blue-900/30 rounded-md border border-blue-200 dark:border-blue-800 hover:border-blue-300 dark:hover:border-blue-700 transition-colors duration-200 cursor-pointer" title="Show database contents in Caido console">
           <i class="pi pi-list text-sm"></i>Show DB Contents
+        </button> -->
+        <button @click="showSettingsDialog = true" class="inline-flex items-center gap-2 px-3 py-2 text-sm font-medium text-purple-600 hover:text-purple-700 bg-purple-50 dark:bg-purple-900/20 hover:bg-purple-100 dark:hover:bg-purple-900/30 rounded-md border border-purple-200 dark:border-purple-800 hover:border-purple-300 dark:hover:border-purple-700 transition-colors duration-200 cursor-pointer" title="Open Settings">
+          <i class="pi pi-cog text-sm"></i>Settings
         </button>
         <button @click="openGitHubInBrowser" class="inline-flex items-center gap-2 px-3 py-2 text-sm font-medium text-gray-700 dark:text-gray-300 bg-gray-100 dark:bg-gray-700 hover:bg-gray-200 dark:hover:bg-gray-600 rounded-md border border-gray-200 dark:border-gray-600 transition-colors duration-200 cursor-pointer">
           <svg class="w-4 h-4 text-yellow-500" fill="currentColor" viewBox="0 0 24 24"><path d="M12 17.27 18.18 21l-1.64-7.03L22 9.24l-7.19-.61L12 2 9.19 8.63 2 9.24l5.46 4.73L5.82 21z"/></svg>Star on GitHub
@@ -2637,395 +3300,89 @@ onMounted(async () => {
         <div class="p-4">
           <TabView v-model:activeIndex="activeTab" class="h-full">
             <TabPanel header="Input">
-            <div class="mb-4 p-4 bg-blue-50 dark:bg-blue-900/20 rounded-lg">
-              <h3 class="font-semibold text-blue-800 dark:text-blue-200 mb-2">Step 1: Input Your Schema</h3>
-              <p class="text-sm text-blue-700 dark:text-blue-300">
-                Paste your OpenAPI schema (JSON format) here. The schema will be validated and test cases will be generated.
-              </p>
-            </div>
-              <div class="space-y-4">
-                <div><label class="block text-sm font-medium mb-2">Base URL</label><InputText v-model="baseUrl" placeholder="http://localhost:3000" class="w-full" /></div>
-                <div><label class="block text-sm font-medium mb-2">OpenAPI Schema (JSON)</label><Textarea v-model="schemaText" placeholder="Paste your OpenAPI schema here..." class="w-full h-64 font-mono text-sm" @input="validateSchema" /></div>
-                <div v-if="validationResult">
-                  <Message :severity="validationResult.valid ? 'success' : 'error'" :closable="false">
-                    <template #messageicon><i :class="validationResult.valid ? 'pi pi-check' : 'pi pi-exclamation-triangle'"></i></template>
-                    <div><div class="font-semibold">{{ validationResult.valid ? 'Schema is valid!' : 'Schema validation failed' }}</div><div v-if="validationResult.errors.length > 0" class="mt-2"><div v-for="error in validationResult.errors" :key="error" class="text-sm">• {{ error }}</div></div></div>
-                  </Message>
-                </div>
-                <Button label="Load Schema" @click="loadSchema" :disabled="!validationResult?.valid" class="w-full" />
-              </div>
+              <InputTab 
+                :baseUrl="baseUrl"
+                :schemaText="schemaText"
+                :validationResult="validationResult"
+                :inputMode="inputMode"
+                :rawEndpoints="rawEndpoints"
+                @update:baseUrl="baseUrl = $event"
+                @update:schemaText="schemaText = $event"
+                @update:inputMode="inputMode = $event"
+                @update:rawEndpoints="rawEndpoints = $event"
+                @validate="validateSchema"
+                @loadSchema="loadSchema"
+                @loadRawEndpoints="loadRawEndpoints"
+              />
             </TabPanel>
             <TabPanel header="Endpoints">
-            <div v-if="!isSchemaLoaded" class="text-center py-8 text-gray-500">
-              <i class="pi pi-list text-4xl mb-4"></i>
-              <p>No schema loaded yet. Load a valid schema from the Input tab.</p>
-            </div>
-
-            <div v-else>
-              <div class="mb-4 p-4 bg-green-50 dark:bg-green-900/20 rounded-lg">
-                <h3 class="font-semibold text-green-800 dark:text-green-200 mb-2">Step 2: Configure & Test</h3>
-                <p class="text-sm text-green-700 dark:text-green-300">
-                  Configure your test settings and run tests. You can test individual endpoints or run all tests at once.
-                </p>
-              </div>
-
-              <div class="space-y-4">
-                <Card>
-                  <template #title>Test Configuration</template>
-                  <template #content>
-                    <div class="grid grid-cols-1 md:grid-cols-4 gap-4">
-                      <div><label class="block text-sm font-medium mb-2">Base URL</label><InputText v-model="baseUrl" placeholder="http://localhost:3000" class="w-full" /></div>
-                      <div><label class="block text-sm font-medium mb-2">Number of Workers</label><InputNumber v-model="workers" :min="1" :max="10" class="w-full" placeholder="1" /></div>
-                      <div><label class="block text-sm font-medium mb-2">Delay Between Requests (ms)</label><InputNumber v-model="delayBetweenRequests" :min="0" :max="10000" class="w-full" placeholder="0" /></div>
-                      <div><label class="block text-sm font-medium mb-2">Timeout (ms)</label><InputNumber v-model="timeout" :min="1000" :max="120000" class="w-full" placeholder="30000" /></div>
-                    </div>
-                    <div class="mt-4">
-                      <label class="block text-sm font-medium mb-2">Custom Headers</label>
-                      <Textarea v-model="customHeaders" placeholder="Authorization: Bearer token&#10;X-API-Key: your-api-key&#10;X-Custom-Header: value" class="w-full h-20 text-sm font-mono" rows="3" />
-                      <p class="text-xs text-gray-500 mt-1">Enter headers in format: Key: Value (one per line). If you add custom headers, they will replace the default headers completely.</p>
-                    </div>
-                    <div class="mt-4 space-y-3">
-                      <div class="flex items-center gap-2"><input type="checkbox" id="randomValues" v-model="useRandomValues" class="w-4 h-4 text-blue-600 bg-gray-100 border-gray-300 rounded focus:ring-blue-500 focus:ring-2" /><label for="randomValues" class="text-sm font-medium">Use Random Values for Empty Variables</label></div>
-                      <p class="text-xs text-gray-500">When enabled, empty path variables will be filled with random strings instead of being left empty.</p>
-                    </div>
-                    <div class="mt-4 flex gap-2">
-                      <Button label="Test All Endpoints" @click="runAllTests" :loading="isLoading" :disabled="isLoading" class="flex-1" />
-                      <Button v-if="isLoading || runningTests.size > 0" label="Stop Tests" @click="stopAllTests" severity="danger" size="small" />
-                    </div>
-                  </template>
-                </Card>
-                <Card>
-                  <template #title>
-                    <div class="flex items-center justify-between">
-                      <span>Endpoints ({{ displayTestCases.length }})</span>
-                      <div class="flex items-center gap-2">
-                        <InputText
-                          v-model="endpointSearchQuery"
-                          placeholder="Search endpoints..."
-                          class="w-64"
-                          size="small"
-                        />
-                        <Button 
-                          v-if="endpointSearchQuery.trim()"
-                          label="Clear" 
-                          icon="pi pi-times"
-                          @click="clearEndpointSearch"
-                          severity="secondary"
-                          size="small"
-                        />
-                      </div>
-                    </div>
-                  </template>
-                  <template #content>
-                    <div class="border border-gray-200 dark:border-gray-700 rounded-lg overflow-hidden">
-                      <div class="bg-gray-100 dark:bg-gray-800 px-4 py-3 border-b border-gray-200 dark:border-gray-600">
-                        <div class="grid grid-cols-5 gap-4 items-center text-sm font-medium text-gray-900 dark:text-gray-100">
-                          <div>Method</div><div class="col-span-2">Path</div><div>Status</div><div>Actions</div>
-                        </div>
-                      </div>
-                      <div class="divide-y divide-gray-200 dark:divide-gray-600">
-                        <div v-for="(testCase, index) in displayTestCases" :key="`${testCase.method}-${testCase.path}`" :class="index % 2 === 0 ? 'bg-blue-200 dark:bg-blue-900/40' : 'bg-blue-300 dark:bg-blue-900/50'" :style="index % 2 === 0 ? 'background-color: #2f323a' : 'background-color: #353942'">
-                          <div class="px-4 py-3 cursor-pointer" @click="toggleTestCaseExpansion(testCase)">
-                            <div class="grid grid-cols-5 gap-4 items-center">
-                              <div><span class="px-2 py-1 rounded text-xs font-medium" :class="{'bg-blue-100 text-blue-800': testCase.method === 'GET', 'bg-green-100 text-green-800': testCase.method === 'POST', 'bg-yellow-100 text-yellow-800': testCase.method === 'PUT', 'bg-red-100 text-red-800': testCase.method === 'DELETE'}">{{ testCase.method }}</span></div>
-                              <div class="col-span-2"><code class="text-sm bg-gray-100 dark:bg-gray-700 text-gray-900 dark:text-gray-100 px-2 py-1 rounded whitespace-normal break-words">{{ testCase.path }}</code></div>
-                              <div><div v-if="getTestStatus(testCase)" class="flex items-center gap-2"><span :class="getStatusClass(getTestStatus(testCase)!.success)">{{ getStatusIcon(getTestStatus(testCase)!.success) }}</span><span :class="getStatusClass(getTestStatus(testCase)!.success)">{{ getTestStatus(testCase)!.status }}</span></div><div v-else class="text-gray-400 text-sm">Not tested</div></div>
-                              <div class="flex items-center gap-2" @click.stop>
-                                <Button :icon="isTestCaseExpanded(testCase) ? 'pi pi-chevron-down' : 'pi pi-chevron-right'" size="small" @click="toggleTestCaseExpansion(testCase)" severity="secondary" text :title="isTestCaseExpanded(testCase) ? 'Collapse' : 'Expand'" />
-                                <Button label="Test" size="small" @click="runSingleTest(testCase)" :loading="isTestRunning(testCase)" :disabled="isTestRunning(testCase) || isLoading" />
-                              </div>
-                            </div>
-                          </div>
-                          <div v-if="isTestCaseExpanded(testCase)" :class="index % 2 === 0 ? 'bg-blue-200 dark:bg-blue-900/40' : 'bg-blue-300 dark:bg-blue-900/50'" :style="index % 2 === 0 ? 'background-color: #2f323a' : 'background-color: #353942'" class="border-t border-gray-200 dark:border-gray-600 px-4 py-4">
-                            <div class="space-y-4">
-                              <div v-if="testCase.pathVariables && testCase.pathVariables.length > 0">
-                                <h4 class="text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">Path Variables</h4>
-                                <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
-                                  <div v-for="variable in testCase.pathVariables" :key="variable" class="flex items-center gap-2">
-                                    <label class="text-sm text-gray-600 dark:text-gray-400 min-w-[100px]">{{ variable }}:</label>
-                                    <InputText v-model="testCasePathVariableValues[getTestCaseId(testCase)][variable]" :placeholder="`Value for ${variable}`" class="flex-1" size="small" />
-                                  </div>
-                                </div>
-                              </div>
-                              <div v-if="testCase.parameters && testCase.parameters.filter((p: any) => p.in === 'query').length > 0">
-                                <h4 class="text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">Query Parameters</h4>
-                                <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
-                                  <div v-for="param in testCase.parameters.filter((p: any) => p.in === 'query')" :key="param.name" class="flex items-center gap-2">
-                                    <label class="text-sm text-gray-600 dark:text-gray-400 min-w-[100px]">{{ param.name }}:</label>
-                                    <InputText v-model="testCaseQueryParameterValues[getTestCaseId(testCase)][param.name]" :placeholder="`Value for ${param.name}`" class="flex-1" size="small" />
-                                  </div>
-                                </div>
-                              </div>
-                              <div v-if="testCase.bodyVariables && Object.keys(testCase.bodyVariables).length > 0">
-                                <h4 class="text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">Body Variables</h4>
-                                <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
-                                  <div v-for="[key, value] in Object.entries(testCase.bodyVariables)" :key="key" class="flex items-center gap-2">
-                                    <label class="text-sm text-gray-600 dark:text-gray-400 min-w-[100px]">{{ key }}:</label>
-                                    <InputText v-model="testCaseBodyVariableValues[getTestCaseId(testCase)][key]" :placeholder="`Value for ${key}`" class="flex-1" size="small" />
-                                  </div>
-                                </div>
-                              </div>
-                              <div v-if="(!testCase.pathVariables || testCase.pathVariables.length === 0) && (!testCase.parameters || testCase.parameters.filter((p: any) => p.in === 'query').length === 0) && (!testCase.bodyVariables || Object.keys(testCase.bodyVariables).length === 0)">
-                                <p class="text-sm text-gray-500 dark:text-gray-400">No variables to configure for this endpoint.</p>
-                              </div>
-                            </div>
-                          </div>
-                        </div>
-                      </div>
-                    </div>
-                  </template>
-                </Card>
-              </div>
-            </div>
-          </TabPanel>
-
-            <TabPanel header="Definition">
-              <div v-if="!parsedSchema" class="text-center py-8 text-gray-500">
-                <i class="pi pi-file-text text-4xl mb-4"></i>
-                <p>No schema loaded yet. Load a valid schema from the Input tab to view its definition.</p>
-              </div>
-              <div v-else class="space-y-6">
-                <Card>
-                  <template #title><div class="flex items-center gap-2"><i class="pi pi-info-circle text-blue-500"></i>API Information</div></template>
-                  <template #content>
-                    <div class="space-y-4">
-                      <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
-                        <div><label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Title</label><p class="text-sm text-gray-900 dark:text-gray-100">{{ parsedSchema.info?.title || 'N/A' }}</p></div>
-                        <div><label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Version</label><p class="text-sm text-gray-900 dark:text-gray-100">{{ parsedSchema.info?.version || 'N/A' }}</p></div>
-                        <div v-if="parsedSchema.info?.description" class="md:col-span-2"><label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Description</label><p class="text-sm text-gray-900 dark:text-gray-100">{{ parsedSchema.info.description }}</p></div>
-                        <div v-if="parsedSchema.info?.contact" class="md:col-span-2"><label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Contact</label><p class="text-sm text-gray-900 dark:text-gray-100">{{ parsedSchema.info.contact.name || '' }} {{ parsedSchema.info.contact.email ? `(${parsedSchema.info.contact.email})` : '' }} {{ parsedSchema.info.contact.url ? `- ${parsedSchema.info.contact.url}` : '' }}</p></div>
-                        <div v-if="parsedSchema.info?.license" class="md:col-span-2"><label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">License</label><p class="text-sm text-gray-900 dark:text-gray-100">{{ parsedSchema.info.license.name }} {{ parsedSchema.info.license.url ? `(${parsedSchema.info.license.url})` : '' }}</p></div>
-                        <div v-if="parsedSchema.openapi || parsedSchema.swagger"><label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">OpenAPI Version</label><p class="text-sm text-gray-900 dark:text-gray-100">{{ parsedSchema.openapi || parsedSchema.swagger }}</p></div>
-                      </div>
-                      <div v-if="parsedSchema.servers || parsedSchema.host">
-                        <h4 class="font-medium text-gray-700 dark:text-gray-300 mb-2">Server Information</h4>
-                        <div class="space-y-2">
-                          <div v-if="parsedSchema.host"><span class="font-medium text-gray-600 dark:text-gray-400">Host:</span><code class="ml-2 text-sm bg-gray-100 dark:bg-gray-700 px-2 py-1 rounded">{{ parsedSchema.host }}</code></div>
-                          <div v-if="parsedSchema.basePath"><span class="font-medium text-gray-600 dark:text-gray-400">Base Path:</span><code class="ml-2 text-sm bg-gray-100 dark:bg-gray-700 px-2 py-1 rounded">{{ parsedSchema.basePath }}</code></div>
-                          <div v-if="parsedSchema.schemes"><span class="font-medium text-gray-600 dark:text-gray-400">Schemes:</span><span class="ml-2 text-sm">{{ parsedSchema.schemes.join(', ') }}</span></div>
-                          <div v-if="parsedSchema.servers"><span class="font-medium text-gray-600 dark:text-gray-400">Servers:</span><div class="ml-2 space-y-1"><div v-for="(server, index) in parsedSchema.servers" :key="index" class="text-sm"><code class="bg-gray-100 dark:bg-gray-700 px-2 py-1 rounded">{{ server.url }}</code><span v-if="server.description" class="ml-2 text-gray-500">- {{ server.description }}</span></div></div></div>
-                        </div>
-                      </div>
-                      <div v-if="parsedSchema.tags">
-                        <h4 class="font-medium text-gray-700 dark:text-gray-300 mb-2">Tags</h4>
-                        <div class="flex flex-wrap gap-2">
-                          <div v-for="tag in parsedSchema.tags" :key="tag.name" class="flex items-center gap-2">
-                            <span class="px-3 py-1 bg-indigo-500 text-white dark:bg-indigo-600 dark:text-indigo-100 text-xs rounded-full font-medium shadow-sm">{{ tag.name }}</span>
-                            <span v-if="tag.description" class="text-sm text-gray-600 dark:text-gray-400">{{ tag.description }}</span>
-                          </div>
-                        </div>
-                      </div>
-                    </div>
-                  </template>
-                </Card>
-                <Card>
-                  <template #title><div class="flex items-center gap-2"><i class="pi pi-link text-green-500"></i>API Endpoints ({{ Object.keys(parsedSchema.paths || {}).length }})</div></template>
-                  <template #content>
-                    <div class="space-y-4">
-                      <div v-for="(methods, path) in parsedSchema.paths" :key="path" class="border border-gray-200 dark:border-gray-700 rounded-lg">
-                        <div class="flex items-center justify-between p-3 bg-gray-50 dark:bg-gray-800 cursor-pointer hover:bg-gray-100 dark:hover:bg-gray-700" @click="togglePathExpansion(path)">
-                          <div class="flex items-center gap-2"><i :class="isPathExpanded(path) ? 'pi pi-chevron-down' : 'pi pi-chevron-right'" class="text-gray-500"></i><span class="font-mono text-sm font-medium text-gray-900 dark:text-gray-100">{{ path }}</span></div>
-                          <div class="flex items-center gap-2"><div class="flex gap-1"><span v-for="method in Object.keys(methods)" :key="method" :class="['px-2 py-1 text-xs font-bold rounded', getMethodColor(method)]">{{ method.toUpperCase() }}</span></div><span class="text-xs text-gray-500">{{ Object.keys(methods).length }} methods</span></div>
-                        </div>
-                        <div v-if="isPathExpanded(path)" class="p-4 space-y-4">
-                          <div v-for="(operation, method) in methods" :key="method" class="border-l-4 border-gray-200 dark:border-gray-600 pl-4">
-                            <div class="flex items-center gap-3 mb-3"><span :class="['px-3 py-1 text-sm font-bold rounded shadow-sm', getMethodColor(method)]">{{ method.toUpperCase() }}</span><h4 class="font-medium text-gray-900 dark:text-gray-100">{{ operation.summary || operation.operationId || `${method.toUpperCase()} ${path}` }}</h4></div>
-                            <div class="space-y-4 text-sm">
-                              <div class="flex items-center gap-4 text-xs">
-                                <div v-if="operation.operationId"><span class="font-medium text-gray-600 dark:text-gray-400">Operation ID:</span><code class="ml-1 bg-gray-100 dark:bg-gray-700 px-2 py-1 rounded">{{ operation.operationId }}</code></div>
-                                <div v-if="operation.tags && operation.tags.length > 0"><span class="font-medium text-gray-600 dark:text-gray-400">Tags:</span><div class="flex flex-wrap gap-1 mt-1"><span v-for="tag in operation.tags" :key="tag" class="px-2 py-1 bg-emerald-500 text-white dark:bg-emerald-600 dark:text-emerald-100 rounded text-xs font-medium">{{ tag }}</span></div></div>
-                              </div>
-                              <div v-if="operation.description" class="text-gray-600 dark:text-gray-400">{{ operation.description }}</div>
-                              <div v-if="operation.consumes || operation.produces" class="flex items-center gap-4 text-xs">
-                                <div v-if="operation.consumes"><span class="font-medium text-gray-600 dark:text-gray-400">Consumes:</span><span class="ml-1">{{ operation.consumes.join(', ') }}</span></div>
-                                <div v-if="operation.produces"><span class="font-medium text-gray-600 dark:text-gray-400">Produces:</span><span class="ml-1">{{ operation.produces.join(', ') }}</span></div>
-                              </div>
-                              <div v-if="operation.parameters && operation.parameters.length > 0">
-                                <h5 class="font-medium text-gray-700 dark:text-gray-300 mb-2">Parameters</h5>
-                                <div class="space-y-3">
-                                  <div v-for="param in operation.parameters" :key="param.name" class="border border-gray-200 dark:border-gray-600 rounded p-3">
-                                    <div class="flex items-center gap-2 mb-1">
-                                      <span class="font-mono text-gray-900 dark:text-gray-100 font-medium">{{ param.name }}</span>
-                                      <span class="px-2 py-1 bg-cyan-500 text-white dark:bg-cyan-600 dark:text-cyan-100 rounded text-xs font-medium">{{ param.in }}</span>
-                                      <span v-if="param.required" class="px-2 py-1 bg-red-500 text-white dark:bg-red-600 dark:text-red-100 rounded text-xs font-medium">required</span>
-                                      <span v-else class="px-2 py-1 bg-gray-500 text-white dark:bg-gray-600 dark:text-gray-100 rounded text-xs font-medium">optional</span>
-                                      <span v-if="param.schema" class="px-2 py-1 bg-blue-500 text-white dark:bg-blue-600 dark:text-blue-100 rounded text-xs font-medium">{{ formatSchemaType(param.schema) }}</span>
-                                    </div>
-                                    <div v-if="param.description" class="text-gray-600 dark:text-gray-400 text-xs">{{ param.description }}</div>
-                                    <div v-if="param.in === 'body' && param.schema" class="mt-3">
-                                      <div class="bg-gray-50 dark:bg-gray-800 p-3 rounded">
-                                        <div class="text-xs text-gray-500 dark:text-gray-400 mb-2">Request Body Schema:</div>
-                                        <div class="text-sm font-mono text-gray-900 dark:text-gray-100 mb-2">{{ formatSchemaType(param.schema) }}</div>
-                                        <div v-if="param.schema.$ref" class="mb-3"><div class="text-xs text-gray-500 dark:text-gray-400 mb-1">References:</div><code class="text-xs bg-gray-100 dark:bg-gray-700 px-2 py-1 rounded">{{ param.schema.$ref }}</code></div>
-                                        <div class="mb-3"><div class="text-xs text-gray-500 dark:text-gray-400 mb-1">Example Value:</div><pre class="text-xs bg-gray-900 dark:bg-gray-700 text-gray-100 p-3 rounded overflow-auto max-h-48 font-mono">{{ formatExampleValue(param.schema) }}</pre></div>
-                                        <div v-if="param.schema.properties" class="space-y-2"><div class="text-xs text-gray-500 dark:text-gray-400">Properties:</div><div class="space-y-1 pl-2"><div v-for="(prop, propName) in param.schema.properties" :key="propName" class="flex items-center gap-2 text-xs"><span class="font-mono text-gray-700 dark:text-gray-300 font-medium">{{ propName }}</span><span class="px-2 py-1 bg-blue-500 text-white dark:bg-blue-600 dark:text-blue-100 rounded font-medium">{{ formatSchemaType(prop) }}</span><span v-if="prop.description" class="text-gray-500">- {{ prop.description }}</span><span v-if="prop.example" class="text-gray-400">(example: {{ prop.example }})</span><span v-if="prop.default" class="text-gray-400">(default: {{ prop.default }})</span></div></div></div>
-                                        <div v-if="param.schema.additionalProperties" class="mt-2"><div class="text-xs text-gray-500 dark:text-gray-400">Additional Properties:</div><span class="text-xs text-gray-700 dark:text-gray-300">{{ formatSchemaType(param.schema.additionalProperties) }}</span></div>
-                                      </div>
-                                    </div>
-                                    <div v-if="param.in !== 'body' && param.schema && param.schema.properties" class="mt-2"><div class="text-xs text-gray-500 dark:text-gray-400 mb-1">Properties:</div><div class="space-y-1 pl-2"><div v-for="(prop, propName) in param.schema.properties" :key="propName" class="flex items-center gap-2"><span class="font-mono text-gray-700 dark:text-gray-300">{{ propName }}</span><span class="px-2 py-1 bg-blue-500 text-white dark:bg-blue-600 dark:text-blue-100 rounded text-xs font-medium">{{ formatSchemaType(prop) }}</span><span v-if="prop.description" class="text-gray-500">- {{ prop.description }}</span></div></div></div>
-                                  </div>
-                                </div>
-                              </div>
-                              <div v-if="operation.requestBody">
-                                <h5 class="font-medium text-gray-700 dark:text-gray-300 mb-2">Request Body</h5>
-                                <div class="border border-gray-200 dark:border-gray-600 rounded p-3">
-                                  <div v-if="operation.requestBody.required !== undefined" class="mb-2"><span v-if="operation.requestBody.required" class="px-2 py-1 bg-red-500 text-white dark:bg-red-600 dark:text-red-100 rounded text-xs font-medium">required</span><span v-else class="px-2 py-1 bg-gray-500 text-white dark:bg-gray-600 dark:text-gray-100 rounded text-xs font-medium">optional</span></div>
-                                  <div v-if="operation.requestBody.content">
-                                    <div v-for="(content, mediaType) in operation.requestBody.content" :key="mediaType" class="mb-3">
-                                      <div class="text-gray-600 dark:text-gray-400 mb-1 font-medium">{{ mediaType }}</div>
-                                      <div v-if="content.schema" class="bg-gray-50 dark:bg-gray-800 p-3 rounded text-xs font-mono">
-                                        <div class="text-gray-900 dark:text-gray-100 mb-1">{{ formatSchemaType(content.schema) }}</div>
-                                        <div v-if="content.schema.$ref" class="mb-2"><div class="text-xs text-gray-500 dark:text-gray-400 mb-1">References:</div><code class="text-xs bg-gray-100 dark:bg-gray-700 px-2 py-1 rounded">{{ content.schema.$ref }}</code></div>
-                                        <div class="mb-2"><div class="text-xs text-gray-500 dark:text-gray-400 mb-1">Example Value:</div><pre class="text-xs bg-gray-900 dark:bg-gray-700 text-gray-100 p-2 rounded overflow-auto max-h-32 font-mono">{{ formatExampleValue(content.schema) }}</pre></div>
-                                        <div v-if="content.schema.properties" class="space-y-1 pl-2"><div v-for="(prop, propName) in content.schema.properties" :key="propName" class="flex items-center gap-2"><span class="font-mono text-gray-700 dark:text-gray-300">{{ propName }}</span><span class="px-2 py-1 bg-blue-500 text-white dark:bg-blue-600 dark:text-blue-100 rounded text-xs font-medium">{{ formatSchemaType(prop) }}</span><span v-if="prop.description" class="text-gray-500">- {{ prop.description }}</span></div></div>
-                                      </div>
-                                    </div>
-                                  </div>
-                                </div>
-                              </div>
-                              <div v-if="operation.responses">
-                                <h5 class="font-medium text-gray-700 dark:text-gray-300 mb-2">Responses</h5>
-                                <div class="space-y-3">
-                                  <div v-for="(response, statusCode) in operation.responses" :key="statusCode" class="border border-gray-200 dark:border-gray-600 rounded p-3">
-                                    <div class="flex items-center gap-2 mb-2">
-                                      <span :class="['px-2 py-1 rounded font-medium text-xs', statusCode.startsWith('2') ? 'bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200' : statusCode.startsWith('4') ? 'bg-yellow-100 text-yellow-800 dark:bg-yellow-900 dark:text-yellow-200' : statusCode.startsWith('5') ? 'bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200' : 'bg-gray-100 text-gray-800 dark:bg-gray-900 dark:text-gray-200']">{{ statusCode }}</span>
-                                      <span class="text-gray-600 dark:text-gray-400 font-medium">{{ response.description || 'No description' }}</span>
-                                    </div>
-                                    <div v-if="response.content" class="space-y-2"><div v-for="(content, mediaType) in response.content" :key="mediaType"><div class="text-gray-600 dark:text-gray-400 text-xs mb-1">{{ mediaType }}</div><div v-if="content.schema" class="bg-gray-50 dark:bg-gray-800 p-2 rounded text-xs font-mono">{{ formatSchemaType(content.schema) }}</div></div></div>
-                                    <div v-if="response.schema" class="bg-gray-50 dark:bg-gray-800 p-2 rounded text-xs font-mono">{{ formatSchemaType(response.schema) }}</div>
-                                  </div>
-                                </div>
-                              </div>
-                            </div>
-                          </div>
-                        </div>
-                      </div>
-                    </div>
-                  </template>
-                </Card>
-                <Card v-if="parsedSchema.components || parsedSchema.definitions">
-                  <template #title><div class="flex items-center gap-2"><i class="pi pi-cube text-purple-500"></i>Components & Definitions</div></template>
-                  <template #content>
-                    <div class="space-y-6">
-                      <div v-if="parsedSchema.components?.schemas">
-                        <h4 class="font-medium text-gray-700 dark:text-gray-300 mb-3">Schemas</h4>
-                        <div class="space-y-3">
-                          <div v-for="(schema, name) in parsedSchema.components.schemas" :key="name" class="border border-gray-200 dark:border-gray-700 rounded-lg">
-                            <div class="flex items-center justify-between p-3 bg-gray-50 dark:bg-gray-800 cursor-pointer hover:bg-gray-100 dark:hover:bg-gray-700" @click="toggleComponentExpansion(name)">
-                              <div class="flex items-center gap-3"><i :class="isComponentExpanded(name) ? 'pi pi-chevron-down' : 'pi pi-chevron-right'" class="text-gray-500"></i><span class="font-medium text-gray-900 dark:text-gray-100">{{ name }}</span><span class="px-2 py-1 bg-blue-500 text-white dark:bg-blue-600 dark:text-blue-100 rounded text-xs font-medium">{{ formatSchemaType(schema) }}</span></div>
-                              <div class="flex items-center gap-2 text-xs text-gray-500"><span v-if="schema.properties">{{ Object.keys(schema.properties).length }} properties</span><span v-if="schema.required">{{ schema.required.length }} required</span></div>
-                            </div>
-                            <div v-if="isComponentExpanded(name)" class="p-4 space-y-4">
-                              <div v-if="schema.description" class="text-sm text-gray-600 dark:text-gray-400 bg-gray-50 dark:bg-gray-800 p-3 rounded">{{ schema.description }}</div>
-                              <div class="flex items-center gap-4 text-xs">
-                                <div v-if="schema.type"><span class="font-medium text-gray-600 dark:text-gray-400">Type:</span><span class="ml-1 px-2 py-1 bg-gray-100 dark:bg-gray-700 rounded">{{ schema.type }}</span></div>
-                                <div v-if="schema.format"><span class="font-medium text-gray-600 dark:text-gray-400">Format:</span><span class="ml-1 px-2 py-1 bg-gray-100 dark:bg-gray-700 rounded">{{ schema.format }}</span></div>
-                                <div v-if="schema.example"><span class="font-medium text-gray-600 dark:text-gray-400">Example:</span><code class="ml-1 bg-gray-100 dark:bg-gray-700 px-2 py-1 rounded">{{ schema.example }}</code></div>
-                              </div>
-                              <div v-if="schema.properties" class="space-y-3">
-                                <h5 class="font-medium text-gray-700 dark:text-gray-300">Properties</h5>
-                                <div class="space-y-2">
-                                  <div v-for="(prop, propName) in schema.properties" :key="propName" class="border border-gray-200 dark:border-gray-600 rounded p-3">
-                                    <div class="flex items-center gap-2 mb-1"><span class="font-medium text-gray-900 dark:text-gray-100">{{ propName }}</span><span class="px-2 py-1 bg-blue-500 text-white dark:bg-blue-600 dark:text-blue-100 rounded text-xs font-medium">{{ formatSchemaType(prop) }}</span><span v-if="schema.required && schema.required.includes(propName)" class="px-2 py-1 bg-red-500 text-white dark:bg-red-600 dark:text-red-100 rounded text-xs font-medium">required</span><span v-else class="px-2 py-1 bg-gray-500 text-white dark:bg-gray-600 dark:text-gray-100 rounded text-xs font-medium">optional</span></div>
-                                    <div v-if="prop.description" class="text-sm text-gray-600 dark:text-gray-400 mb-2">{{ prop.description }}</div>
-                                    <div class="flex items-center gap-4 text-xs">
-                                      <div v-if="prop.format"><span class="font-medium text-gray-600 dark:text-gray-400">Format:</span><span class="ml-1 px-2 py-1 bg-gray-100 dark:bg-gray-700 rounded">{{ prop.format }}</span></div>
-                                      <div v-if="prop.example"><span class="font-medium text-gray-600 dark:text-gray-400">Example:</span><code class="ml-1 bg-gray-100 dark:bg-gray-700 px-2 py-1 rounded">{{ prop.example }}</code></div>
-                                      <div v-if="prop.default"><span class="font-medium text-gray-600 dark:text-gray-400">Default:</span><code class="ml-1 bg-gray-100 dark:bg-gray-700 px-2 py-1 rounded">{{ prop.default }}</code></div>
-                                    </div>
-                                    <div v-if="prop.enum" class="mt-2"><div class="text-xs text-gray-500 dark:text-gray-400 mb-1">Enum values:</div><div class="flex flex-wrap gap-1"><span v-for="enumValue in prop.enum" :key="enumValue" class="px-2 py-1 bg-gray-100 dark:bg-gray-700 text-gray-700 dark:text-gray-300 rounded text-xs">{{ enumValue }}</span></div></div>
-                                  </div>
-                                </div>
-                              </div>
-                              <div v-if="schema.required && schema.required.length > 0" class="bg-yellow-50 dark:bg-yellow-900/20 p-3 rounded"><h6 class="font-medium text-yellow-800 dark:text-yellow-200 mb-2">Required Fields</h6><div class="flex flex-wrap gap-2"><span v-for="requiredField in schema.required" :key="requiredField" class="px-2 py-1 bg-yellow-100 text-yellow-800 dark:bg-yellow-900 dark:text-yellow-200 rounded text-xs font-medium">{{ requiredField }}</span></div></div>
-                            </div>
-                          </div>
-                        </div>
-                      </div>
-                      <div v-if="parsedSchema.definitions">
-                        <h4 class="font-medium text-gray-700 dark:text-gray-300 mb-3">Definitions</h4>
-                        <div class="space-y-3">
-                          <div v-for="(schema, name) in parsedSchema.definitions" :key="name" class="border border-gray-200 dark:border-gray-700 rounded-lg">
-                            <div class="flex items-center justify-between p-3 bg-gray-50 dark:bg-gray-800 cursor-pointer hover:bg-gray-100 dark:hover:bg-gray-700" @click="toggleComponentExpansion(name)">
-                              <div class="flex items-center gap-3"><i :class="isComponentExpanded(name) ? 'pi pi-chevron-down' : 'pi pi-chevron-right'" class="text-gray-500"></i><span class="font-medium text-gray-900 dark:text-gray-100">{{ name }}</span><span class="px-2 py-1 bg-blue-500 text-white dark:bg-blue-600 dark:text-blue-100 rounded text-xs font-medium">{{ formatSchemaType(schema) }}</span></div>
-                              <div class="flex items-center gap-2 text-xs text-gray-500"><span v-if="schema.properties">{{ Object.keys(schema.properties).length }} properties</span><span v-if="schema.required">{{ schema.required.length }} required</span></div>
-                            </div>
-                            <div v-if="isComponentExpanded(name)" class="p-4 space-y-4">
-                              <div v-if="schema.description" class="text-sm text-gray-600 dark:text-gray-400 bg-gray-50 dark:bg-gray-800 p-3 rounded">{{ schema.description }}</div>
-                              <div class="flex items-center gap-4 text-xs">
-                                <div v-if="schema.type"><span class="font-medium text-gray-600 dark:text-gray-400">Type:</span><span class="ml-1 px-2 py-1 bg-gray-100 dark:bg-gray-700 rounded">{{ schema.type }}</span></div>
-                                <div v-if="schema.format"><span class="font-medium text-gray-600 dark:text-gray-400">Format:</span><span class="ml-1 px-2 py-1 bg-gray-100 dark:bg-gray-700 rounded">{{ schema.format }}</span></div>
-                              </div>
-                              <div v-if="schema.properties" class="space-y-3">
-                                <h5 class="font-medium text-gray-700 dark:text-gray-300">Properties</h5>
-                                <div class="space-y-2">
-                                  <div v-for="(prop, propName) in schema.properties" :key="propName" class="border border-gray-200 dark:border-gray-600 rounded p-3">
-                                    <div class="flex items-center gap-2 mb-1"><span class="font-medium text-gray-900 dark:text-gray-100">{{ propName }}</span><span class="px-2 py-1 bg-blue-500 text-white dark:bg-blue-600 dark:text-blue-100 rounded text-xs font-medium">{{ formatSchemaType(prop) }}</span><span v-if="schema.required && schema.required.includes(propName)" class="px-2 py-1 bg-red-500 text-white dark:bg-red-600 dark:text-red-100 rounded text-xs font-medium">required</span><span v-else class="px-2 py-1 bg-gray-500 text-white dark:bg-gray-600 dark:text-gray-100 rounded text-xs font-medium">optional</span></div>
-                                    <div v-if="prop.description" class="text-sm text-gray-600 dark:text-gray-400 mb-2">{{ prop.description }}</div>
-                                    <div class="flex items-center gap-4 text-xs">
-                                      <div v-if="prop.format"><span class="font-medium text-gray-600 dark:text-gray-400">Format:</span><span class="ml-1 px-2 py-1 bg-gray-100 dark:bg-gray-700 rounded">{{ prop.format }}</span></div>
-                                      <div v-if="prop.example"><span class="font-medium text-gray-600 dark:text-gray-400">Example:</span><code class="ml-1 bg-gray-100 dark:bg-gray-700 px-2 py-1 rounded">{{ prop.example }}</code></div>
-                                      <div v-if="prop.default"><span class="font-medium text-gray-600 dark:text-gray-400">Default:</span><code class="ml-1 bg-gray-100 dark:bg-gray-700 px-2 py-1 rounded">{{ prop.default }}</code></div>
-                                    </div>
-                                    <div v-if="prop.enum" class="mt-2"><div class="text-xs text-gray-500 dark:text-gray-400 mb-1">Enum values:</div><div class="flex flex-wrap gap-1"><span v-for="enumValue in prop.enum" :key="enumValue" class="px-2 py-1 bg-gray-100 dark:bg-gray-700 text-gray-700 dark:text-gray-300 rounded text-xs">{{ enumValue }}</span></div></div>
-                                  </div>
-                                </div>
-                              </div>
-                              <div v-if="schema.required && schema.required.length > 0" class="bg-yellow-50 dark:bg-yellow-900/20 p-3 rounded"><h6 class="font-medium text-yellow-800 dark:text-yellow-200 mb-2">Required Fields</h6><div class="flex flex-wrap gap-2"><span v-for="requiredField in schema.required" :key="requiredField" class="px-2 py-1 bg-yellow-100 text-yellow-800 dark:bg-yellow-900 dark:text-yellow-200 rounded text-xs font-medium">{{ requiredField }}</span></div></div>
-                            </div>
-                          </div>
-                        </div>
-                      </div>
-                    </div>
-                  </template>
-                </Card>
-              </div>
+              <EndpointsTab
+                :isSchemaLoaded="isSchemaLoaded"
+                :baseUrl="baseUrl"
+                :customHeaders="customHeaders"
+                :useRandomValues="useRandomValues"
+                :isLoading="isLoading"
+                :runningTests="runningTests"
+                :endpointSearchQuery="endpointSearchQuery"
+                :displayTestCases="displayTestCases"
+                :testCasePathVariableValues="testCasePathVariableValues"
+                :testCaseQueryParameterValues="testCaseQueryParameterValues"
+                :testCaseBodyVariableValues="testCaseBodyVariableValues"
+                :isTestCaseExpanded="isTestCaseExpanded"
+                :isTestRunning="isTestRunning"
+                :getTestStatus="getTestStatus"
+                :getStatusClass="getStatusClass"
+                :getStatusIcon="getStatusIcon"
+                :getTestCaseId="getTestCaseId"
+                @update:baseUrl="baseUrl = $event"
+                @update:customHeaders="customHeaders = $event"
+                @update:useRandomValues="useRandomValues = $event"
+                @update:endpointSearchQuery="endpointSearchQuery = $event"
+                @runAllTests="runAllTests"
+                @stopAllTests="stopAllTests"
+                @toggleTestCaseExpansion="toggleTestCaseExpansion"
+                @runSingleTest="runSingleTest"
+                @runAllMethods="runAllMethods"
+                @clearEndpointSearch="clearEndpointSearch"
+                @updateTestCasePathVariable="(tc, v, val) => { if (!testCasePathVariableValues[getTestCaseId(tc)]) testCasePathVariableValues[getTestCaseId(tc)] = {}; testCasePathVariableValues[getTestCaseId(tc)][v] = val; }"
+                @updateTestCaseQueryParameter="(tc, p, val) => { if (!testCaseQueryParameterValues[getTestCaseId(tc)]) testCaseQueryParameterValues[getTestCaseId(tc)] = {}; testCaseQueryParameterValues[getTestCaseId(tc)][p] = val; }"
+                @updateTestCaseBodyVariable="(tc, k, val) => { if (!testCaseBodyVariableValues[getTestCaseId(tc)]) testCaseBodyVariableValues[getTestCaseId(tc)] = {}; testCaseBodyVariableValues[getTestCaseId(tc)][k] = val; }"
+              />
+            </TabPanel>
+            <TabPanel v-if="!isRawMode" header="Definition">
+              <DefinitionTab
+                :parsedSchema="parsedSchema"
+                :formatSchemaType="formatSchemaType"
+                :formatExampleValue="formatExampleValue"
+                :getMethodColor="getMethodColor"
+                :isPathExpanded="isPathExpanded"
+                :isComponentExpanded="isComponentExpanded"
+                @togglePathExpansion="togglePathExpansion"
+                @toggleComponentExpansion="toggleComponentExpansion"
+              />
             </TabPanel>
             <TabPanel header="Results">
-              <div class="space-y-4">
-                <div v-if="!hasResults" class="text-center py-8 text-gray-500"><i class="pi pi-chart-bar text-4xl mb-4"></i><p>No test results yet. Run tests from the Endpoints tab.</p></div>
-                <div v-else>
-                  <Card>
-                    <template #title>
-                      <div class="flex items-center justify-between">
-                        <span>{{ isQueryActive ? 'Filtered Test Results' : 'Test Results' }}<span v-if="isQueryActive" class="text-sm text-gray-500 ml-2">({{ filteredTestResults.length }} of {{ allTestResults.length }})</span></span>
-                        <Button label="Clear All Results" icon="pi pi-trash" @click="clearAllResults" severity="danger" size="small" />
-                      </div>
-                    </template>
-                    <template #content>
-                      <div class="space-y-2">
-                        <div v-for="data in (isQueryActive ? filteredTestResults : allTestResults)" :key="getResultId(data)" class="border border-gray-200 dark:border-gray-700 rounded-lg">
-                          <div class="p-4 hover:bg-gray-50 dark:hover:bg-gray-700 cursor-pointer" @click="toggleResultExpansion(getResultId(data))">
-                            <div class="flex items-center justify-between">
-                              <div class="flex items-center gap-4 flex-1">
-                                <div class="flex-1"><div class="font-medium">{{ data.testCase.name }}</div><div class="text-sm text-gray-500">{{ data.testCase.description }}</div></div>
-                                <span class="px-2 py-1 rounded text-xs font-medium" :class="{'bg-blue-100 text-blue-800': data.testCase.method === 'GET', 'bg-green-100 text-green-800': data.testCase.method === 'POST', 'bg-yellow-100 text-yellow-800': data.testCase.method === 'PUT', 'bg-red-100 text-red-800': data.testCase.method === 'DELETE'}">{{ data.testCase.method }}</span>
-                                <code class="text-sm bg-gray-100 dark:bg-gray-700 text-gray-900 dark:text-gray-100 px-2 py-1 rounded">{{ data.testCase.path }}</code>
-                                <div class="flex items-center gap-2"><span :class="getStatusClass(data.success)">{{ getStatusIcon(data.success) }}</span><span :class="getStatusClass(data.success)">{{ data.status }}</span></div>
-                                <span class="text-sm">{{ formatResponseTime(data.responseTime) }}</span>
-                                <span class="text-sm text-gray-600 dark:text-gray-400">{{ getResponseSize(data.response) }}</span>
-                              </div>
-                              <Button :icon="isResultExpanded(getResultId(data)) ? 'pi pi-chevron-up' : 'pi pi-chevron-down'" size="small" text rounded class="text-gray-500" />
-                            </div>
-                            <div v-if="data.combination && Object.keys(data.combination).length > 0" class="mt-2 text-sm text-gray-600"><span class="font-medium">Variables:</span><span v-for="(value, key) in data.combination" :key="key" class="ml-2">{{ key }} = "{{ value }}"</span></div>
-                          </div>
-                          <div v-if="isResultExpanded(getResultId(data))" class="border-t border-gray-200 dark:border-gray-700 h-[600px]">
-                            <div class="flex h-full">
-                              <div class="w-1/2 border-r border-gray-200 dark:border-gray-700"><div class="h-full" :ref="el => setRequestEditorContainer(el, getResultId(data))"></div></div>
-                              <div class="w-1/2"><div class="h-full" :ref="el => setResponseEditorContainer(el, getResultId(data))"></div></div>
-                            </div>
-                          </div>
-                        </div>
-                      </div>
-                    </template>
-                  </Card>
-                </div>
-              </div>
+              <ResultsTab
+                :hasResults="hasResults"
+                :isQueryActive="isQueryActive"
+                :filteredTestResults="filteredTestResults"
+                :allTestResults="allTestResults"
+                :getResultId="getResultId"
+                :isResultExpanded="isResultExpanded"
+                :getStatusClass="getStatusClass"
+                :getStatusIcon="getStatusIcon"
+                :formatResponseTime="formatResponseTime"
+                :getResponseSize="getResponseSize"
+                :setRequestEditorContainer="setRequestEditorContainer"
+                :setResponseEditorContainer="setResponseEditorContainer"
+                @clearAllResults="clearAllResults"
+                @toggleResultExpansion="toggleResultExpansion"
+              />
             </TabPanel>
           </TabView>
         </div>
       </div>
-      <div v-if="isSchemaLoaded && (getUniquePathVariables().length > 0 || Object.keys(bodyVariableValues).length > 0)" :class="['w-80 bg-white dark:bg-gray-800 border-l border-gray-200 dark:border-gray-700 shadow-lg transition-all duration-300 ease-in-out overflow-y-auto', sidebarOpen ? 'translate-x-0' : 'translate-x-full']">
+      <div v-if="isSchemaLoaded && (getUniquePathVariables().length > 0 || getUniqueQueryParameters().length > 0 || Object.keys(bodyVariableValues).length > 0)" :class="['w-80 bg-white dark:bg-gray-800 border-l border-gray-200 dark:border-gray-700 shadow-lg transition-all duration-300 ease-in-out overflow-y-auto', sidebarOpen ? 'translate-x-0' : 'translate-x-full']">
         <div class="p-4">
           <div class="mb-4"><h3 class="text-lg font-semibold text-gray-800 dark:text-gray-200">Global Variables</h3></div>
           <div class="border-t border-gray-200 dark:border-gray-700 pt-4">
@@ -3035,8 +3392,22 @@ onMounted(async () => {
                 <div class="flex items-center justify-between"><label class="block text-sm font-medium text-gray-700 dark:text-gray-300">{{ variable }}</label><Button label="Add Value" icon="pi pi-plus" @click="addPathVariableValue(variable)" size="small" severity="success" class="text-xs px-2 py-1" /></div>
                 <div class="space-y-2">
                   <div v-for="(value, index) in getPathVariableValue(variable)" :key="index" class="flex items-center gap-2">
-                    <InputText v-model="pathVariableValues[variable][index]" :placeholder="`Value ${index + 1} for ${variable}`" class="flex-1" @paste="handlePathVariablePaste(variable, $event)" />
+                    <InputText :modelValue="(pathVariableValues[variable] && pathVariableValues[variable][index]) || ''" @update:modelValue="(val) => { if (!pathVariableValues[variable]) pathVariableValues[variable] = []; pathVariableValues[variable][index] = val; }" :placeholder="`Value ${index + 1} for ${variable}`" class="flex-1" @paste="handlePathVariablePaste(variable, $event)" />
                     <Button v-if="getPathVariableValue(variable).length > 1" label="Remove" icon="pi pi-trash" @click="removePathVariableValue(variable, index)" size="small" severity="danger" class="text-xs px-2 py-1" />
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div v-if="getUniqueQueryParameters().length > 0" class="border-t border-gray-200 dark:border-gray-700 pt-4 mt-4">
+            <div class="mb-3"><h4 class="text-md font-medium text-gray-700 dark:text-gray-300">Query Parameters</h4><p class="text-xs text-gray-500 mt-1">Add multiple values to test different combinations. Each value will be tested separately.</p></div>
+            <div class="space-y-3">
+              <div v-for="param in getUniqueQueryParameters()" :key="param" class="space-y-2">
+                <div class="flex items-center justify-between"><label class="block text-sm font-medium text-gray-700 dark:text-gray-300">{{ param }}</label><Button label="Add Value" icon="pi pi-plus" @click="addQueryParameterValue(param)" size="small" severity="success" class="text-xs px-2 py-1" /></div>
+                <div class="space-y-2">
+                  <div v-for="(value, index) in getQueryParameterValue(param)" :key="index" class="flex items-center gap-2">
+                    <InputText :modelValue="(queryParameterValues[param] && queryParameterValues[param][index]) || ''" @update:modelValue="(val) => { if (!queryParameterValues[param]) queryParameterValues[param] = []; queryParameterValues[param][index] = val; }" :placeholder="`Value ${index + 1} for ${param}`" class="flex-1" @paste="handleQueryParameterPaste(param, $event)" />
+                    <Button v-if="getQueryParameterValue(param).length > 1" label="Remove" icon="pi pi-trash" @click="removeQueryParameterValue(param, index)" size="small" severity="danger" class="text-xs px-2 py-1" />
                   </div>
                 </div>
               </div>
@@ -3049,7 +3420,7 @@ onMounted(async () => {
                 <div class="flex items-center justify-between"><label class="block text-sm font-medium text-gray-700 dark:text-gray-300">{{ key }}</label><Button label="Add Value" icon="pi pi-plus" @click="addBodyVariableValue(key)" size="small" severity="success" class="text-xs px-2 py-1" /></div>
                 <div class="space-y-2">
                   <div v-for="(value, index) in getBodyVariableValue(key)" :key="index" class="flex items-center gap-2">
-                    <InputText v-model="bodyVariableValues[key][index]" :placeholder="`Value ${index + 1} for ${key}`" class="flex-1" @paste="handleBodyVariablePaste(key, $event)" />
+                    <InputText :modelValue="(bodyVariableValues[key] && bodyVariableValues[key][index]) || ''" @update:modelValue="(val) => { if (!bodyVariableValues[key]) bodyVariableValues[key] = []; bodyVariableValues[key][index] = val; }" :placeholder="`Value ${index + 1} for ${key}`" class="flex-1" @paste="handleBodyVariablePaste(key, $event)" />
                     <Button v-if="getBodyVariableValue(key).length > 1" label="Remove" icon="pi pi-trash" @click="removeBodyVariableValue(key, index)" size="small" severity="danger" class="text-xs px-2 py-1" />
                   </div>
                 </div>
@@ -3059,6 +3430,23 @@ onMounted(async () => {
         </div>
       </div>
     </div>
+
+    <!-- Settings Dialog -->
+    <Dialog v-model:visible="showSettingsDialog" modal header="Settings" :style="{ width: '800px' }" :draggable="false">
+      <SettingsTab
+        :workers="workers"
+        :delayBetweenRequests="delayBetweenRequests"
+        :timeout="timeout"
+        :allowDeleteInAllMethods="allowDeleteInAllMethods"
+        :defaultPlaceholders="defaultPlaceholders"
+        @update:workers="(v) => { workers = v; saveGlobalSettings(); }"
+        @update:delayBetweenRequests="(v) => { delayBetweenRequests = v; saveGlobalSettings(); }"
+        @update:timeout="(v) => { timeout = v; saveGlobalSettings(); }"
+        @update:allowDeleteInAllMethods="(v) => { allowDeleteInAllMethods = v; saveGlobalSettings(); }"
+        @update:placeholder="updatePlaceholder"
+        @resetPlaceholders="resetPlaceholders"
+      />
+    </Dialog>
   </div>
 </template>
 
