@@ -26,16 +26,17 @@ This extension helps you test your API endpoints by importing OpenAPI specs or P
 
 ## How to use it
 
-1. **Add your API spec**: Paste your OpenAPI JSON or import a Postman collection
+1. **Add your API spec**: Paste your OpenAPI JSON/YAML or Postman collection
+**RAW Endpoints** You can now import raw endpoints with or without method to test 
 2. **Set up variables**: Add different values you want to test. There are two types:
    - **General variables**: Used automatically everywhere in your tests
    - **Local variables**: Set directly on specific tests and override the general values
+   - **templates Variables**: Set on application level allow you to set placeholder for common variables
 3. **Find endpoints**: Search for the specific API paths you want to test
 4. **Run tests**: The extension will test all your combinations automatically. You can configure:
    - **Delay between requests**: Set how long to wait between each test
    - **Worker numbers**: Control how many tests run at the same time
    - **Custom headers**: Add authorization tokens, cookies, or other headers
-
 
 
 ![image](https://github.com/MDGDSS/caido-openapi/blob/main/Assets/3.gif?raw=true)

@@ -122,6 +122,62 @@ const buildQueryParams = (parameters?: any[]): Record<string, string> => {
   return queryParams;
 };
 
+// Build header parameters from OpenAPI parameters definition
+const buildHeaderParams = (parameters?: any[]): Record<string, string> => {
+  const headerParams: Record<string, string> = {};
+  if (!parameters || parameters.length === 0) return headerParams;
+
+  for (const param of parameters) {
+    if (!param || (param.in !== 'header' && param.in !== 'Header')) continue;
+    const name = param.name || '';
+    if (!name) continue;
+
+    // Prefer explicit example/defaults
+    let value: any = undefined;
+    if (param.example !== undefined) value = param.example;
+    else if (param.examples) {
+      const firstKey = Object.keys(param.examples)[0];
+      if (firstKey && param.examples[firstKey]?.value !== undefined) {
+        value = param.examples[firstKey].value;
+      }
+    }
+
+    const schema = param.schema || {};
+    if (value === undefined) {
+      if (schema.example !== undefined) value = schema.example;
+      else if (schema.default !== undefined) value = schema.default;
+    }
+
+    // Fallback: generate a basic example from schema/type
+    if (value === undefined) {
+      const basicSchema = schema.type ? schema : param; // Swagger 2 may use param.type
+      try {
+        value = generateExampleValue(basicSchema, 0);
+      } catch (_) {
+        // Final fallback by type heuristics
+        const type = basicSchema.type || 'string';
+        if (type === 'integer' || type === 'number') value = 0;
+        else if (type === 'boolean') value = true;
+        else if (type === 'array') value = ['value'];
+        else value = 'value';
+      }
+    }
+
+    // Only include required params, or those with computed values
+    if (param.required || value !== undefined) {
+      if (Array.isArray(value)) {
+        headerParams[name] = value.map(v => String(v)).join(',');
+      } else if (typeof value === 'object' && value !== null) {
+        headerParams[name] = JSON.stringify(value);
+      } else {
+        headerParams[name] = String(value);
+      }
+    }
+  }
+
+  return headerParams;
+};
+
 const parseOpenAPISchema = (sdk: SDK, schemaText: string): OpenAPISchema => {
   try {
     const schema = JSON.parse(schemaText);
@@ -491,7 +547,7 @@ const findPossibleObjectDefinitions = (param: any, parsedSchema: OpenAPISchema, 
   return candidates;
 };
 
-const executeTest = async (sdk: SDK, testCase: TestCase, options: TestOptions, pathVariableValues?: Record<string, string>, bodyVariableValues?: Record<string, any>, queryParameterValues?: Record<string, string>): Promise<TestResult> => {
+const executeTest = async (sdk: SDK, testCase: TestCase, options: TestOptions, pathVariableValues?: Record<string, string>, bodyVariableValues?: Record<string, any>, queryParameterValues?: Record<string, string>, headerParameterValues?: Record<string, string>): Promise<TestResult> => {
   const startTime = Date.now();
   let requestBody: any = null; // Declare requestBody at function scope
   
@@ -551,6 +607,18 @@ const executeTest = async (sdk: SDK, testCase: TestCase, options: TestOptions, p
       spec.setQuery(queryStringRaw);
     }
     
+    // Build headers from operation parameters (header params)
+    const headerParams = buildHeaderParams(testCase.parameters);
+    
+    // Override with custom header parameter values if provided
+    if (headerParameterValues && Object.keys(headerParameterValues).length > 0) {
+      Object.entries(headerParameterValues).forEach(([key, value]) => {
+        if (value !== undefined && value !== '') {
+          headerParams[key] = value;
+        }
+      });
+    }
+    
     // Set headers - custom headers from UI replace defaults
     const defaultHeaders = {
       'Content-Type': 'application/json',
@@ -570,9 +638,11 @@ const executeTest = async (sdk: SDK, testCase: TestCase, options: TestOptions, p
     };
     
     // Use custom headers if provided, otherwise use defaults
+    // Then merge with header parameters from schema (header params take precedence)
     const headersToUse = {
       ...defaultHeaders,
-      ...(options.headers && Object.keys(options.headers).length > 0 ? options.headers : {})
+      ...(options.headers && Object.keys(options.headers).length > 0 ? options.headers : {}),
+      ...headerParams // Header parameters from schema override everything
     };
     
     // Set all headers
@@ -931,10 +1001,10 @@ const runSpecificTests = async (sdk: SDK, schema: OpenAPISchema, baseUrl: string
   }
 };
 
-const runSingleTest = async (sdk: SDK, testCase: TestCase, baseUrl: string, options: Partial<TestOptions> = {}, pathVariableValues?: Record<string, string>, bodyVariableValues?: Record<string, any>, queryParameterValues?: Record<string, string>): Promise<TestResult> => {
+const runSingleTest = async (sdk: SDK, testCase: TestCase, baseUrl: string, options: Partial<TestOptions> = {}, pathVariableValues?: Record<string, string>, bodyVariableValues?: Record<string, any>, queryParameterValues?: Record<string, string>, headerParameterValues?: Record<string, string>): Promise<TestResult> => {
   try {
     // Debug logs removed
-    const result = await executeTest(sdk, testCase, { ...options, baseUrl }, pathVariableValues, bodyVariableValues, queryParameterValues);
+    const result = await executeTest(sdk, testCase, { ...options, baseUrl }, pathVariableValues, bodyVariableValues, queryParameterValues, headerParameterValues);
     
     // Debug logs removed
     
@@ -1049,6 +1119,252 @@ const testHttpRequest = async (sdk: SDK, url: string): Promise<{ success: boolea
       response: error instanceof Error ? error.message : 'Unknown error'
     };
   }
+};
+
+// Determine allowed HTTP methods for endpoints using OPTIONS requests
+const determineMethodsForEndpoints = async (
+  sdk: SDK,
+  endpoints: string[],
+  baseUrl: string,
+  options?: { timeout?: number; headers?: Record<string, string>; stopFlag?: { stop: boolean } }
+): Promise<Array<{ path: string; methods: string[] }>> => {
+ // sdk.console.log(`[Determine] Starting determineMethodsForEndpoints with ${endpoints.length} endpoints`);
+ // sdk.console.log(`[Determine] Base URL: ${baseUrl}`);
+ // sdk.console.log(`[Determine] Endpoints: ${JSON.stringify(endpoints)}`);
+ // sdk.console.log(`[Determine] Options: timeout=${options?.timeout || 30000}, headers=${JSON.stringify(options?.headers || {})}`);
+  
+  const results: Array<{ path: string; methods: string[] }> = [];
+  const timeout = options?.timeout || 30000;
+  const headers = options?.headers || {};
+  const stopFlag = options?.stopFlag || { stop: false };
+
+  for (const endpoint of endpoints) {
+    // Check if stop was requested
+    if (stopFlag.stop) {
+      sdk.console.log(`[Determine] Stopped by user request`);
+      break;
+    }
+    try {
+      sdk.console.log(`[Determine] Processing endpoint: ${endpoint}`);
+      // Parse base URL to extract scheme/host and base path
+      let specBase = baseUrl;
+      let basePathPrefix = '';
+      try {
+        const parsed = new URL(baseUrl);
+        specBase = `${parsed.protocol}//${parsed.host}`;
+        basePathPrefix = parsed.pathname || '';
+        if (basePathPrefix.endsWith('/')) {
+          basePathPrefix = basePathPrefix.slice(0, -1);
+        }
+        sdk.console.log(`[Determine] ${endpoint}: Parsed base URL - specBase: ${specBase}, basePathPrefix: ${basePathPrefix}`);
+      } catch (_) {
+        specBase = baseUrl;
+        basePathPrefix = '';
+        sdk.console.log(`[Determine] ${endpoint}: Failed to parse base URL, using as-is: ${specBase}`);
+      }
+
+      // Compose full path
+      const safePath = endpoint.startsWith('/') ? endpoint : `/${endpoint}`;
+      const fullPath = `${basePathPrefix}${safePath}` || '/';
+      sdk.console.log(`[Determine] ${endpoint}: Full path: ${fullPath}`);
+
+      // Create RequestSpec for OPTIONS request
+      const spec = new RequestSpec(specBase);
+      spec.setMethod('OPTIONS');
+      spec.setPath(fullPath);
+      sdk.console.log(`[Determine] ${endpoint}: Created OPTIONS request to ${specBase}${fullPath}`);
+
+      // Set headers - use same default headers as GET requests
+      const defaultHeaders = {
+        'Content-Type': 'application/json',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
+        'Accept-Language': 'fr-FR,fr;q=0.9,en-US;q=0.8,en;q=0.7',
+        'Accept-Encoding': 'gzip, deflate, br, zstd',
+        'Upgrade-Insecure-Requests': '1',
+        'Sec-Fetch-Site': 'none',
+        'Sec-Fetch-Mode': 'navigate',
+        'Sec-Fetch-User': '?1',
+        'Sec-Fetch-Dest': 'document',
+        'Connection': 'keep-alive',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36',
+        'sec-ch-ua': '"Not)A;Brand";v="8", "Chromium";v="138", "Google Chrome";v="138"',
+        'sec-ch-ua-mobile': '?0',
+        'sec-ch-ua-platform': '"Windows"'
+      };
+      
+      // Use custom headers if provided, otherwise use defaults
+      const headersToUse = {
+        ...defaultHeaders,
+        ...(headers && Object.keys(headers).length > 0 ? headers : {})
+      };
+      
+      // Set all headers
+      Object.entries(headersToUse).forEach(([key, value]) => {
+        spec.setHeader(key, value);
+      });
+
+      // Send OPTIONS request
+      sdk.console.log(`[Determine] ${endpoint}: Sending OPTIONS request...`);
+      const sentRequest = await sdk.requests.send(spec);
+
+      if (sentRequest.response) {
+        const statusCode = sentRequest.response.getCode();
+        let allowedMethods: string[] = [];
+
+        // Debug: Log response status
+        sdk.console.log(`[Determine] ${endpoint}: OPTIONS response received - Status ${statusCode}`);
+
+        // Try to get allowed methods from Allow header
+        try {
+          let responseHeaders: any = null;
+          
+          if (typeof sentRequest.response.getHeaders === 'function') {
+            responseHeaders = sentRequest.response.getHeaders();
+            sdk.console.log(`[Determine] ${endpoint}: Using getHeaders() method`);
+          } else if (sentRequest.response.headers) {
+            responseHeaders = sentRequest.response.headers;
+            sdk.console.log(`[Determine] ${endpoint}: Using headers property`);
+          } else {
+            sdk.console.log(`[Determine] ${endpoint}: No headers available (getHeaders: ${typeof sentRequest.response.getHeaders}, headers: ${!!sentRequest.response.headers})`);
+          }
+
+          if (responseHeaders) {
+            // Debug: Log headers type and content
+            sdk.console.log(`[Determine] ${endpoint}: Headers type: ${responseHeaders.constructor?.name || typeof responseHeaders}`);
+            try {
+              sdk.console.log(`[Determine] ${endpoint}: Headers content: ${JSON.stringify(responseHeaders, null, 2)}`);
+            } catch (e) {
+              sdk.console.log(`[Determine] ${endpoint}: Could not stringify headers: ${e}`);
+            }
+            
+            let allowHeader: string | undefined;
+
+            if (responseHeaders instanceof Map) {
+              sdk.console.log(`[Determine] ${endpoint}: Headers is Map`);
+              let allowValue: any = responseHeaders.get('Allow') || responseHeaders.get('allow');
+              sdk.console.log(`[Determine] ${endpoint}: Initial Allow value from Map: ${allowValue}`);
+              // Try case-insensitive search
+              if (!allowValue) {
+                for (const [key, value] of responseHeaders.entries()) {
+                  if (String(key).toLowerCase() === 'allow') {
+                    allowValue = value;
+                    sdk.console.log(`[Determine] ${endpoint}: Found Allow header (case-insensitive): ${value}`);
+                    break;
+                  }
+                }
+              }
+              // Handle array values
+              if (allowValue) {
+                if (Array.isArray(allowValue)) {
+                  allowHeader = String(allowValue[0] || '');
+                  sdk.console.log(`[Determine] ${endpoint}: Allow header was array, using first element: "${allowHeader}"`);
+                } else {
+                  allowHeader = String(allowValue);
+                  sdk.console.log(`[Determine] ${endpoint}: Allow header value: "${allowHeader}"`);
+                }
+              } else {
+                sdk.console.log(`[Determine] ${endpoint}: No Allow header found in Map`);
+              }
+            } else if (Array.isArray(responseHeaders)) {
+              sdk.console.log(`[Determine] ${endpoint}: Headers is Array`);
+              const allowEntry = responseHeaders.find(([key]) => 
+                String(key).toLowerCase() === 'allow'
+              );
+              allowHeader = allowEntry ? String(allowEntry[1]) : undefined;
+              sdk.console.log(`[Determine] ${endpoint}: Allow header from Array: ${allowHeader || 'not found'}`);
+            } else if (typeof responseHeaders === 'object') {
+              sdk.console.log(`[Determine] ${endpoint}: Headers is Object`);
+              // Try various case variations
+              let allowValue: any = (responseHeaders as any).Allow || 
+                          (responseHeaders as any).allow || 
+                          (responseHeaders as any)['Allow'] ||
+                          (responseHeaders as any)['allow'];
+              
+              // Try case-insensitive search
+              if (!allowValue) {
+                for (const key in responseHeaders) {
+                  if (key.toLowerCase() === 'allow') {
+                    allowValue = (responseHeaders as any)[key];
+                    break;
+                  }
+                }
+              }
+              
+              // Handle array values (some servers return headers as arrays)
+              if (allowValue) {
+                if (Array.isArray(allowValue)) {
+                  // If it's an array, take the first element
+                  allowHeader = String(allowValue[0] || '');
+                  sdk.console.log(`[Determine] ${endpoint}: Allow header was array, using first element: "${allowHeader}"`);
+                } else {
+                  allowHeader = String(allowValue);
+                  sdk.console.log(`[Determine] ${endpoint}: Allow header value: "${allowHeader}"`);
+                }
+              } else {
+                sdk.console.log(`[Determine] ${endpoint}: No Allow header found in Object`);
+              }
+            }
+
+            if (allowHeader) {
+              sdk.console.log(`[Determine] ${endpoint}: Found Allow header: "${allowHeader}"`);
+              // Parse Allow header: "GET, POST, PUT, DELETE"
+              // allowHeader should already be a string at this point (arrays handled above)
+              allowedMethods = String(allowHeader)
+                .split(',')
+                .map(m => m.trim().toUpperCase())
+                .filter(m => m && m !== 'OPTIONS' && m !== 'HEAD'); // Remove OPTIONS and HEAD from results
+              sdk.console.log(`[Determine] ${endpoint}: Parsed methods: ${JSON.stringify(allowedMethods)}`);
+            } else {
+              sdk.console.log(`[Determine] ${endpoint}: No Allow header found (Status: ${statusCode})`);
+              if (statusCode === 404) {
+                sdk.console.log(`[Determine] ${endpoint}: Endpoint not found (404) - this is expected if the path doesn't exist`);
+              } else if (statusCode === 405) {
+                sdk.console.log(`[Determine] ${endpoint}: Method not allowed (405) - OPTIONS may not be supported`);
+              } else if (statusCode >= 500) {
+                sdk.console.log(`[Determine] ${endpoint}: Server error (${statusCode})`);
+              } else if (statusCode === 200 || statusCode === 204) {
+                sdk.console.log(`[Determine] ${endpoint}: OPTIONS succeeded (${statusCode}) but no Allow header present`);
+              }
+            }
+          }
+        } catch (headerError) {
+          sdk.console.error(`[Determine] ${endpoint}: Error parsing headers:`, headerError);
+        }
+
+        // If no methods found in Allow header but status is 200/204, try common methods
+        if (allowedMethods.length === 0 && (statusCode === 200 || statusCode === 204)) {
+          // Some servers return 200/204 for OPTIONS but don't include Allow header
+          // In this case, we can't determine methods, so return empty array
+          sdk.console.log(`[Determine] ${endpoint}: Status ${statusCode} but no Allow header, returning empty methods`);
+          allowedMethods = [];
+        }
+
+        sdk.console.log(`[Determine] ${endpoint}: Final result - methods: ${JSON.stringify(allowedMethods)}`);
+        results.push({
+          path: endpoint,
+          methods: allowedMethods
+        });
+      } else {
+        // No response received
+        sdk.console.log(`[Determine] ${endpoint}: No response received`);
+        results.push({
+          path: endpoint,
+          methods: []
+        });
+      }
+    } catch (error) {
+      // Error sending request
+      sdk.console.error(`[Determine] ${endpoint}: Error sending request:`, error);
+      results.push({
+        path: endpoint,
+        methods: []
+      });
+    }
+  }
+
+  sdk.console.log(`[Determine] Finished processing all endpoints. Total results: ${results.length}`);
+  sdk.console.log(`[Determine] Results: ${JSON.stringify(results, null, 2)}`);
+  return results;
 };
 
 // Find test result in Caido's HTTP History and open it in native UI
@@ -1210,10 +1526,174 @@ const saveSessionsToDb = async (sdk: SDK, projectId: string, sessions: any[]): P
     await stmt.run(key, value);
     return { kind: "Ok", value: undefined };
   } catch (error) {
-    sdk.console.error(`Failed to save sessions: ${error instanceof Error ? error.message : String(error)}`);
+    //sdk.console.error(`Failed to save sessions: ${error instanceof Error ? error.message : String(error)}`);
     return {
       kind: "Error",
       error: `Failed to save sessions: ${error instanceof Error ? error.message : String(error)}`,
+    };
+  }
+};
+
+const saveSchemaTextToDb = async (sdk: SDK, projectId: string, sessionId: string, schemaText: string): Promise<Result<void>> => {
+  try {
+    const db = await sdk.meta.db();
+    const baseKey = `openapi-schemaText-${projectId}-${sessionId}`;
+    
+    // Chunk size: 500KB per chunk (to stay well under typical RPC limits)
+    const CHUNK_SIZE = 500 * 1024; // 500KB
+    const textLength = schemaText.length;
+    
+    if (textLength <= CHUNK_SIZE) {
+      // Small enough to save in one chunk
+      const stmt = await db.prepare(`
+        INSERT OR REPLACE INTO config (key, value) 
+        VALUES (?, ?)
+      `);
+      await stmt.run(baseKey, schemaText);
+      return { kind: "Ok", value: undefined };
+    }
+    
+    // Need to chunk - save metadata first, then chunks
+    const numChunks = Math.ceil(textLength / CHUNK_SIZE);
+    const metadata = JSON.stringify({ chunks: numChunks, totalLength: textLength });
+    
+    // Save metadata
+    const metadataStmt = await db.prepare(`
+      INSERT OR REPLACE INTO config (key, value) 
+      VALUES (?, ?)
+    `);
+    await metadataStmt.run(`${baseKey}-metadata`, metadata);
+    
+    // Save each chunk
+    for (let i = 0; i < numChunks; i++) {
+      const start = i * CHUNK_SIZE;
+      const end = Math.min(start + CHUNK_SIZE, textLength);
+      const chunk = schemaText.substring(start, end);
+      const chunkKey = `${baseKey}-chunk-${i}`;
+      
+      const chunkStmt = await db.prepare(`
+        INSERT OR REPLACE INTO config (key, value) 
+        VALUES (?, ?)
+      `);
+      await chunkStmt.run(chunkKey, chunk);
+    }
+    
+    return { kind: "Ok", value: undefined };
+  } catch (error) {
+    //sdk.console.error(`Failed to save schemaText: ${error instanceof Error ? error.message : String(error)}`);
+    return {
+      kind: "Error",
+      error: `Failed to save schemaText: ${error instanceof Error ? error.message : String(error)}`,
+    };
+  }
+};
+
+const loadSchemaTextFromDb = async (sdk: SDK, projectId: string, sessionId: string): Promise<Result<string | null>> => {
+  try {
+    const db = await sdk.meta.db();
+    const baseKey = `openapi-schemaText-${projectId}-${sessionId}`;
+    
+    // First, check for metadata (indicates chunked storage)
+    const metadataStmt = await db.prepare(`SELECT value FROM config WHERE key = ?`);
+    const metadataResult = await metadataStmt.get<{ value: string }>(`${baseKey}-metadata`);
+    
+    if (metadataResult && metadataResult.value) {
+      // Chunked storage - reassemble chunks
+      const metadata = JSON.parse(metadataResult.value);
+      const numChunks = metadata.chunks;
+      const chunks: string[] = [];
+      
+      for (let i = 0; i < numChunks; i++) {
+        const chunkKey = `${baseKey}-chunk-${i}`;
+        const chunkStmt = await db.prepare(`SELECT value FROM config WHERE key = ?`);
+        const chunkResult = await chunkStmt.get<{ value: string }>(chunkKey);
+        
+        if (chunkResult && chunkResult.value) {
+          chunks.push(chunkResult.value);
+        } else {
+          //sdk.console.error(`Missing chunk ${i} for schemaText ${sessionId}`);
+          return {
+            kind: "Error",
+            error: `Missing chunk ${i} for schemaText`,
+          };
+        }
+      }
+      
+      return { kind: "Ok", value: chunks.join('') };
+    }
+    
+    // Not chunked - try single value
+    const stmt = await db.prepare(`SELECT value FROM config WHERE key = ?`);
+    const result = await stmt.get<{ value: string }>(baseKey);
+    
+    if (result === undefined || result.value === undefined) {
+      return { kind: "Ok", value: null };
+    }
+    return { kind: "Ok", value: result.value };
+  } catch (error) {
+    //sdk.console.error(`Failed to load schemaText: ${error instanceof Error ? error.message : String(error)}`);
+    return {
+      kind: "Error",
+      error: `Failed to load schemaText: ${error instanceof Error ? error.message : String(error)}`,
+    };
+  }
+};
+
+// Save a single chunk of schemaText (for large schemas that need chunking)
+const saveSchemaTextChunk = async (sdk: SDK, projectId: string, sessionId: string, chunkIndex: number, chunk: string, metadata?: { chunks: number; totalLength: number }): Promise<Result<void>> => {
+  try {
+    // Validate required parameters
+    if (!projectId || typeof projectId !== 'string') {
+      return {
+        kind: "Error",
+        error: `Invalid projectId: ${projectId}`,
+      };
+    }
+    if (!sessionId || typeof sessionId !== 'string') {
+      return {
+        kind: "Error",
+        error: `Invalid sessionId: ${sessionId}`,
+      };
+    }
+    if (typeof chunkIndex !== 'number' || chunkIndex < 0) {
+      return {
+        kind: "Error",
+        error: `Invalid chunkIndex: ${chunkIndex}`,
+      };
+    }
+    if (!chunk || typeof chunk !== 'string') {
+      return {
+        kind: "Error",
+        error: `Invalid chunk: expected string, got ${typeof chunk}`,
+      };
+    }
+    
+    const db = await sdk.meta.db();
+    const baseKey = `openapi-schemaText-${projectId}-${sessionId}`;
+    
+    // Save metadata if provided (should be sent with first chunk)
+    if (metadata && chunkIndex === 0 && typeof metadata === 'object') {
+      const metadataStmt = await db.prepare(`
+        INSERT OR REPLACE INTO config (key, value) 
+        VALUES (?, ?)
+      `);
+      await metadataStmt.run(`${baseKey}-metadata`, JSON.stringify(metadata));
+    }
+    
+    // Save the chunk
+    const chunkKey = `${baseKey}-chunk-${chunkIndex}`;
+    const chunkStmt = await db.prepare(`
+      INSERT OR REPLACE INTO config (key, value) 
+      VALUES (?, ?)
+    `);
+    await chunkStmt.run(chunkKey, chunk);
+    
+    return { kind: "Ok", value: undefined };
+  } catch (error) {
+    //sdk.console.error(`Failed to save schemaText chunk ${chunkIndex}: ${error instanceof Error ? error.message : String(error)}`);
+    return {
+      kind: "Error",
+      error: `Failed to save schemaText chunk: ${error instanceof Error ? error.message : String(error)}`,
     };
   }
 };
@@ -1391,17 +1871,17 @@ const isMigrationCompleted = async (sdk: SDK): Promise<Result<boolean>> => {
     const stmt = await db.prepare(`SELECT value FROM config WHERE key = 'openapi-migrated'`);
     const row = await stmt.first<{ value: string }>();
     
-    sdk.console.log(`Migration check - row:`, row);
+    //sdk.console.log(`Migration check - row:`, row);
     
     if (row && (row.value === 'true' || row.value === true || String(row.value).toLowerCase() === 'true')) {
-      sdk.console.log('Migration completed flag found, returning true');
+      //sdk.console.log('Migration completed flag found, returning true');
       return { kind: "Ok", value: true };
     }
     
-    sdk.console.log('Migration completed flag not found or not true, returning false');
+    //sdk.console.log('Migration completed flag not found or not true, returning false');
     return { kind: "Ok", value: false };
   } catch (error) {
-    sdk.console.error(`Failed to check migration status: ${error instanceof Error ? error.message : String(error)}`);
+    //sdk.console.error(`Failed to check migration status: ${error instanceof Error ? error.message : String(error)}`);
     return {
       kind: "Error",
       error: `Failed to check migration status: ${error instanceof Error ? error.message : String(error)}`,
@@ -1421,14 +1901,14 @@ const migrateFromLocalStorage = async (sdk: SDK, localStorageData: { sessions: R
       // The key is already the openapi environment variable value
       const projectKey = key.replace('openapi-sessions-', '');
       if (projectKey && Array.isArray(sessions) && sessions.length > 0) {
-        sdk.console.log(`Migrating ${sessions.length} sessions for project key: ${projectKey}`);
+        //sdk.console.log(`Migrating ${sessions.length} sessions for project key: ${projectKey}`);
         
         const result = await saveSessionsToDb(sdk, projectKey, sessions);
         if (result.kind === "Ok") {
           sessionsMigrated += sessions.length;
-          sdk.console.log(`✓ Migrated ${sessions.length} sessions for project: ${projectKey}`);
+          //sdk.console.log(`✓ Migrated ${sessions.length} sessions for project: ${projectKey}`);
         } else {
-          sdk.console.error(`✗ Failed to migrate sessions for ${projectKey}: ${result.error}`);
+          //sdk.console.error(`✗ Failed to migrate sessions for ${projectKey}: ${result.error}`);
         }
       }
     }
@@ -1438,13 +1918,13 @@ const migrateFromLocalStorage = async (sdk: SDK, localStorageData: { sessions: R
       const result = await saveTestResultsToDb(sdk, localStorageData.testResults);
       if (result.kind === "Ok") {
         testResultsMigrated = true;
-        sdk.console.log('Migrated test results');
+        //sdk.console.log('Migrated test results');
       } else {
-        sdk.console.error(`Failed to migrate test results: ${result.error}`);
+        //sdk.console.error(`Failed to migrate test results: ${result.error}`);
       }
     }
     
-    sdk.console.log(`Migration complete: ${sessionsMigrated} sessions migrated, test results: ${testResultsMigrated ? 'yes' : 'no'}`);
+    //sdk.console.log(`Migration complete: ${sessionsMigrated} sessions migrated, test results: ${testResultsMigrated ? 'yes' : 'no'}`);
     
     // Set migrated flag in database
     try {
@@ -1454,9 +1934,9 @@ const migrateFromLocalStorage = async (sdk: SDK, localStorageData: { sessions: R
         VALUES ('openapi-migrated', 'true')
       `);
       await stmt.run();
-      sdk.console.log('Migration flag set in database');
+      //sdk.console.log('Migration flag set in database');
     } catch (error) {
-      sdk.console.error(`Failed to set migration flag: ${error instanceof Error ? error.message : String(error)}`);
+      //sdk.console.error(`Failed to set migration flag: ${error instanceof Error ? error.message : String(error)}`);
     }
     
     return { 
@@ -1486,6 +1966,9 @@ export type API = DefineAPI<{
   setEnvironmentVariable: typeof setEnvironmentVariable;
   saveSessionsToDb: typeof saveSessionsToDb;
   loadSessionsFromDb: typeof loadSessionsFromDb;
+  saveSchemaTextToDb: typeof saveSchemaTextToDb;
+  saveSchemaTextChunk: typeof saveSchemaTextChunk;
+  loadSchemaTextFromDb: typeof loadSchemaTextFromDb;
   saveTestResultsToDb: typeof saveTestResultsToDb;
   loadTestResultsFromDb: typeof loadTestResultsFromDb;
   saveGlobalSettingsToDb: typeof saveGlobalSettingsToDb;
@@ -1494,6 +1977,7 @@ export type API = DefineAPI<{
   migrateFromLocalStorage: typeof migrateFromLocalStorage;
   getAllSessionProjectKeys: typeof getAllSessionProjectKeys;
   isMigrationCompleted: typeof isMigrationCompleted;
+  determineMethodsForEndpoints: typeof determineMethodsForEndpoints;
 }>;
 
 export function init(sdk: SDK<API>) {
@@ -1526,6 +2010,9 @@ export function init(sdk: SDK<API>) {
   sdk.api.register("setEnvironmentVariable", setEnvironmentVariable);
   sdk.api.register("saveSessionsToDb", saveSessionsToDb);
   sdk.api.register("loadSessionsFromDb", loadSessionsFromDb);
+  sdk.api.register("saveSchemaTextToDb", saveSchemaTextToDb);
+  sdk.api.register("saveSchemaTextChunk", saveSchemaTextChunk);
+  sdk.api.register("loadSchemaTextFromDb", loadSchemaTextFromDb);
   sdk.api.register("saveTestResultsToDb", saveTestResultsToDb);
   sdk.api.register("loadTestResultsFromDb", loadTestResultsFromDb);
   sdk.api.register("saveGlobalSettingsToDb", saveGlobalSettingsToDb);
@@ -1534,6 +2021,7 @@ export function init(sdk: SDK<API>) {
   sdk.api.register("migrateFromLocalStorage", migrateFromLocalStorage);
   sdk.api.register("getAllSessionProjectKeys", getAllSessionProjectKeys);
   sdk.api.register("isMigrationCompleted", isMigrationCompleted);
+  sdk.api.register("determineMethodsForEndpoints", determineMethodsForEndpoints);
 }
 
 // Set environment variable using backend SDK

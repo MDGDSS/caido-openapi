@@ -5,6 +5,19 @@
       <p>No schema loaded yet. Load a valid schema from the Input tab to view its definition.</p>
     </div>
     <div v-else class="space-y-6">
+      <!-- Toggle Button -->
+      <div class="flex justify-end mb-4">
+        <Button 
+          :label="showRaw ? 'To Definition' : 'To Raw'" 
+          :icon="showRaw ? 'pi pi-list' : 'pi pi-code'"
+          @click="$emit('toggleRawView')" 
+          :severity="showRaw ? 'secondary' : 'info'"
+          size="small"
+        />
+      </div>
+      
+      <!-- Definition View -->
+      <div v-if="!showRaw">
       <Card>
         <template #title><div class="flex items-center gap-2"><i class="pi pi-info-circle text-blue-500"></i>API Information</div></template>
         <template #content>
@@ -199,25 +212,74 @@
           </div>
         </template>
       </Card>
+      </div>
+      
+      <!-- Raw View -->
+      <div v-else class="space-y-4">
+        <Card>
+          <template #title>
+            <div class="flex items-center justify-between">
+              <div class="flex items-center gap-2">
+                <i class="pi pi-code text-orange-500"></i>
+                <span>Raw Endpoints</span>
+              </div>
+              <Button 
+                label="Copy" 
+                icon="pi pi-copy" 
+                @click="copyRawEndpoints" 
+                size="small"
+                :disabled="!rawEndpointsText"
+              />
+            </div>
+          </template>
+          <template #content>
+            <div class="space-y-2">
+              <label class="block text-sm font-medium">Endpoints (one per line, with query variables if present)</label>
+              <Textarea 
+                :modelValue="rawEndpointsText || ''" 
+                @update:modelValue="$emit('update:rawEndpointsText', $event)" 
+                placeholder="/api/users&#10;/api/users/{id}&#10;/api/orders?status={status}&amp;page={page}"
+                class="w-full font-mono text-sm"
+                style="min-height: 400px;"
+              />
+              <p class="text-xs text-gray-500 dark:text-gray-400">
+                Format: Path with query variables as {variableName}. Copy and paste these endpoints into the Raw Endpoints tab.
+              </p>
+            </div>
+          </template>
+        </Card>
+      </div>
     </div>
   </div>
 </template>
 
 <script setup lang="ts">
 import Card from "primevue/card";
+import Button from "primevue/button";
+import Textarea from "primevue/textarea";
 
-defineProps<{
+const props = defineProps<{
   parsedSchema: any;
   formatSchemaType: (schema: any) => string;
   formatExampleValue: (schema: any) => string;
   getMethodColor: (method: string) => string;
   isPathExpanded: (path: string) => boolean;
   isComponentExpanded: (componentName: string) => boolean;
+  showRaw?: boolean;
+  rawEndpointsText?: string;
 }>();
 
-defineEmits<{
+const emit = defineEmits<{
   'togglePathExpansion': [path: string];
   'toggleComponentExpansion': [componentName: string];
+  'toggleRawView': [];
+  'update:rawEndpointsText': [value: string];
 }>();
+
+const copyRawEndpoints = () => {
+  if (props.rawEndpointsText) {
+    navigator.clipboard.writeText(props.rawEndpointsText);
+  }
+};
 </script>
 

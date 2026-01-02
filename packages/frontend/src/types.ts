@@ -26,6 +26,9 @@ export interface FrontendSDK {
     // Database storage functions
     saveSessionsToDb: (projectId: string, sessions: any[]) => Promise<{ kind: "Error"; error: string } | { kind: "Ok"; value: undefined }>;
     loadSessionsFromDb: (projectId: string) => Promise<{ kind: "Error"; error: string } | { kind: "Ok"; value: any[] }>;
+    saveSchemaTextToDb: (projectId: string, sessionId: string, schemaText: string) => Promise<{ kind: "Error"; error: string } | { kind: "Ok"; value: undefined }>;
+    saveSchemaTextChunk: (projectId: string, sessionId: string, chunkIndex: number, chunk: string, metadata?: { chunks: number; totalLength: number } | undefined) => Promise<{ kind: "Error"; error: string } | { kind: "Ok"; value: undefined }>;
+    loadSchemaTextFromDb: (projectId: string, sessionId: string) => Promise<{ kind: "Error"; error: string } | { kind: "Ok"; value: string | null }>;
     saveTestResultsToDb: (testResults: any) => Promise<{ kind: "Error"; error: string } | { kind: "Ok"; value: undefined }>;
     loadTestResultsFromDb: () => Promise<{ kind: "Error"; error: string } | { kind: "Ok"; value: any }>;
     saveGlobalSettingsToDb: (settings: any) => Promise<{ kind: "Error"; error: string } | { kind: "Ok"; value: undefined }>;
@@ -34,6 +37,7 @@ export interface FrontendSDK {
     migrateFromLocalStorage: (localStorageData: { sessions: Record<string, any[]>, testResults: any }) => Promise<{ kind: "Error"; error: string } | { kind: "Ok"; value: { sessionsMigrated: number; testResultsMigrated: boolean } }>;
     getAllSessionProjectKeys: () => Promise<{ kind: "Error"; error: string } | { kind: "Ok"; value: string[] }>;
     isMigrationCompleted: () => Promise<{ kind: "Error"; error: string } | { kind: "Ok"; value: boolean }>;
+    determineMethodsForEndpoints: (endpoints: string[], baseUrl: string, options?: { timeout?: number; headers?: Record<string, string>; stopFlag?: { stop: boolean } }) => Promise<Array<{ path: string; methods: string[] }>>;
     // Session management
     createSession: (name: string, schema: any, configuration: any) => Promise<any>;
     getSession: (id: string) => Promise<any>;

@@ -23,6 +23,8 @@ import EndpointsTab from "@/components/EndpointsTab.vue";
 import DefinitionTab from "@/components/DefinitionTab.vue";
 import ResultsTab from "@/components/ResultsTab.vue";
 import SettingsTab from "@/components/SettingsTab.vue";
+import DetermineTab from "@/components/DetermineTab.vue";
+import * as yaml from 'js-yaml';
 
 const sdk = useSDK();
 
@@ -75,8 +77,6 @@ const getProjectKey = async (projectId?: string): Promise<string> => {
     return projectId;
   }
   
-  // THIRD: Fallback to 'default' if no project ID available
-  //console.log(`No 'openapi' env var and no project ID, using 'default' key`);
   return 'default';
 };
 
@@ -100,6 +100,7 @@ interface OpenAPISession {
   rawEndpoints?: string;
   pathVariableValues: Record<string, string[]>;
   queryParameterValues: Record<string, string[]>;
+  headerParameterValues: Record<string, string[]>;
   bodyVariableValues: Record<string, string[]>;
   customHeaders: string;
   variablesExpanded: boolean;
@@ -108,6 +109,7 @@ interface OpenAPISession {
   requestResponseTab: string;
   testCasePathVariableValues: Record<string, Record<string, string>>;
   testCaseQueryParameterValues: Record<string, Record<string, string>>;
+  testCaseHeaderParameterValues: Record<string, Record<string, string>>;
   testCaseBodyVariableValues: Record<string, Record<string, any>>;
   createdAt: string;
   lastModified: string;
@@ -159,6 +161,7 @@ const inputMode = ref<'schema' | 'raw'>('schema');
 const rawEndpoints = ref("");
 const pathVariableValues = ref<Record<string, string[]>>({});
 const queryParameterValues = ref<Record<string, string[]>>({});
+const headerParameterValues = ref<Record<string, string[]>>({});
 const bodyVariableValues = ref<Record<string, string[]>>({});
 const runningTests = ref<Set<string>>(new Set());
 const sidebarOpen = ref(true);
@@ -171,6 +174,7 @@ const requestResponseTab = ref('request');
 // Test case specific variable values (these are overridden by sidebar values)
 const testCasePathVariableValues = ref<Record<string, Record<string, string>>>({});
 const testCaseQueryParameterValues = ref<Record<string, Record<string, string>>>({});
+const testCaseHeaderParameterValues = ref<Record<string, Record<string, string>>>({});
 const testCaseBodyVariableValues = ref<Record<string, Record<string, any>>>({});
 
 const requestEditorContainers = ref<Map<string, HTMLElement>>(new Map());
@@ -186,13 +190,191 @@ const parsedSchema = ref<any>(null);
 
 const expandedPaths = ref<Set<string>>(new Set());
 const expandedComponents = ref<Set<string>>(new Set());
+const showRawInDefinition = ref(false);
+
+// Determine methods state
+const determinedResults = ref("");
+const isDetermining = ref(false);
+const determineStopFlag = ref({ stop: false });
+
+// Track if schemaText was excluded from session data due to payload size
+const schemaTextExcluded = ref(false);
+
+// Flag to prevent auto-save during project switch and session loading
+const isLoadingSession = ref(false);
 
 
 //###################################
 // Schema Loading and Validation
 //###################################
 
-// Validate schema locally
+// Convert YAML to JSON if YAML is detected
+const convertYamlToJson = (text: string): { converted: string; wasYaml: boolean } => {
+  const trimmed = text.trim();
+  
+  if (!trimmed) {
+    return { converted: text, wasYaml: false };
+  }
+  
+  // First, try to parse as JSON
+  try {
+    const parsed = JSON.parse(trimmed);
+    // Minify JSON by removing unnecessary whitespace
+    const minified = JSON.stringify(parsed);
+    return { converted: minified, wasYaml: false }; // Already valid JSON, but minified
+  } catch {
+    // Not valid JSON, might be YAML
+  }
+  
+  // Check if it looks like YAML (common OpenAPI YAML patterns)
+  const looksLikeYaml = 
+    trimmed.startsWith('openapi:') || 
+    trimmed.startsWith('swagger:') ||
+    trimmed.startsWith('---') ||
+    (trimmed.includes('\n') && trimmed.includes(':') && !trimmed.startsWith('{') && !trimmed.startsWith('['));
+  
+  if (!looksLikeYaml) {
+    return { converted: text, wasYaml: false };
+  }
+  
+  // Try to parse as YAML
+  try {
+    const yamlDoc = yaml.load(trimmed, { 
+      schema: yaml.DEFAULT_SCHEMA,
+      json: true // Use JSON schema for better compatibility
+    });
+    
+    if (yamlDoc && typeof yamlDoc === 'object') {
+      // Convert to minified JSON (no formatting to reduce size)
+      const jsonString = JSON.stringify(yamlDoc);
+      return { converted: jsonString, wasYaml: true };
+    }
+  } catch (yamlError) {
+    // Not valid YAML either, return original text
+    console.warn('YAML conversion failed:', yamlError);
+  }
+  
+  return { converted: text, wasYaml: false };
+};
+
+// Handle schema text update with YAML conversion
+// Use debouncing to avoid converting on every keystroke
+let schemaUpdateTimeout: ReturnType<typeof setTimeout> | null = null;
+const handleSchemaTextUpdate = (text: string) => {
+ //  console.log('[Schema Update] handleSchemaTextUpdate called, text length:', text.length);
+  
+  // Clear any pending timeout
+  if (schemaUpdateTimeout) {
+    clearTimeout(schemaUpdateTimeout);
+   //  console.log('[Schema Update] Cleared previous timeout');
+  }
+  
+  // Update the text immediately
+  schemaText.value = text;
+  
+  // Debounce YAML conversion - only convert after user stops typing for 500ms
+  schemaUpdateTimeout = setTimeout(async () => {
+    //console.log('[YAML Conversion] Starting conversion check after debounce');
+    
+    // Try to convert YAML to JSON
+    const { converted, wasYaml } = convertYamlToJson(text);
+    // console.log('[YAML Conversion] Input length:', text.length, 'wasYaml:', wasYaml, 'converted length:', converted.length);
+    
+    // Only update if conversion happened (text changed)
+    if (wasYaml && converted !== text) {
+     //  console.log('[YAML Conversion] YAML detected, converting to JSON');
+      schemaText.value = converted;
+      
+      // Save immediately after conversion
+      if (currentSessionId.value) {
+        const currentSession = sessions.value.find(s => s.id === currentSessionId.value);
+        if (currentSession) {
+          currentSession.schemaText = converted;
+          console.log('[YAML Conversion] Updated session schemaText, length:', converted.length);
+          
+          // Save schemaText separately using batching
+          try {
+            let projectKey: string;
+            try {
+              const openapiValue = await sdk.env.getVar('openapi');
+              projectKey = openapiValue || currentProjectId.value || 'default';
+            } catch {
+              projectKey = currentProjectId.value || 'default';
+            }
+            
+              const convertedSize = converted.length;
+              const CHUNK_SIZE = 1000 * 1024; // 600KB
+           //  console.log('[YAML Conversion] Saving schemaText separately for session:', currentSessionId.value, `(${(convertedSize / 1024 / 1024).toFixed(2)} MB)`);
+            
+            if (convertedSize <= CHUNK_SIZE) {
+              // Small enough to save in one call
+              const result = await sdk.backend.saveSchemaTextToDb(projectKey, currentSessionId.value, converted);
+              if (result.kind === "Error") {
+              //  console.error('[YAML Conversion] Failed to save schemaText:', result.error);
+              } else {
+             //    console.log('[YAML Conversion] SchemaText saved successfully');
+              }
+            } else {
+              // Too large - need to chunk
+              const numChunks = Math.ceil(convertedSize / CHUNK_SIZE);
+              const metadata = { chunks: numChunks, totalLength: convertedSize };
+             //  console.log(`[YAML Conversion] Chunking schemaText into ${numChunks} chunks`);
+              
+              // Save chunks sequentially
+              for (let i = 0; i < numChunks; i++) {
+                const start = i * CHUNK_SIZE;
+                const end = Math.min(start + CHUNK_SIZE, convertedSize);
+                const chunk = converted.substring(start, end);
+                
+                // Only pass metadata with the first chunk, don't pass undefined for others
+                let result;
+                if (i === 0) {
+                  result = await sdk.backend.saveSchemaTextChunk(
+                    projectKey, 
+                    currentSessionId.value, 
+                    i, 
+                    chunk, 
+                    metadata
+                  );
+                } else {
+                  result = await sdk.backend.saveSchemaTextChunk(
+                    projectKey, 
+                    currentSessionId.value, 
+                    i, 
+                    chunk
+                  );
+                }
+                
+                if (result.kind === "Error") {
+                  console.error(`[YAML Conversion] Failed to save chunk ${i}:`, result.error);
+                  throw new Error(`Failed to save chunk ${i}: ${result.error}`);
+                }
+                
+             //    console.log(`[YAML Conversion] Saved chunk ${i + 1}/${numChunks} (${(chunk.length / 1024).toFixed(2)} KB)`);
+              }
+              
+           //    console.log('[YAML Conversion] SchemaText saved successfully in chunks');
+            }
+          } catch (saveError) {
+          //   console.error('[YAML Conversion] Exception saving schemaText:', saveError);
+          }
+        }
+      }
+      
+      // Trigger validation after conversion
+      nextTick(() => {
+        validateSchema();
+      });
+    } else {
+     //  console.log('[YAML Conversion] Not YAML or no conversion needed');
+      // Trigger validation for JSON
+      validateSchema();
+    }
+    schemaUpdateTimeout = null;
+  }, 500);
+};
+
+// Validate schema locally (to avoid RPC payload size issues with formatted JSON)
 const validateSchema = async () => {
   try {
     if (!schemaText.value.trim()) {
@@ -200,12 +382,13 @@ const validateSchema = async () => {
       return;
     }
     
-    const result = await sdk.backend.validateSchema(schemaText.value);
+    // Use local validation to avoid payload size issues when JSON is formatted
+    const result = validateSchemaLocally(schemaText.value);
     validationResult.value = result;
   } catch (error) {
     validationResult.value = {
       valid: false,
-      errors: [`Validation error: ${error.message}`]
+      errors: [`Validation error: ${error instanceof Error ? error.message : String(error)}`]
     };
   }
 };
@@ -238,6 +421,7 @@ const createNewSession = (): OpenAPISession => {
     isSchemaLoaded: false,
     pathVariableValues: {},
     queryParameterValues: {},
+    headerParameterValues: {},
     bodyVariableValues: {},
     customHeaders: "",
     variablesExpanded: true,
@@ -246,6 +430,7 @@ const createNewSession = (): OpenAPISession => {
     requestResponseTab: 'request',
     testCasePathVariableValues: {},
     testCaseQueryParameterValues: {},
+    testCaseHeaderParameterValues: {},
     testCaseBodyVariableValues: {},
     createdAt: new Date().toISOString(),
     lastModified: new Date().toISOString()
@@ -255,10 +440,21 @@ const createNewSession = (): OpenAPISession => {
 };
 
 const saveCurrentSession = async () => {
-  if (!currentSessionId.value) return;
+  if (!currentSessionId.value || isLoadingSession.value) return;
   
   const currentSession = sessions.value.find(s => s.id === currentSessionId.value);
   if (currentSession) {
+    // Check if session is empty (no input data)
+    const hasSchemaText = schemaText.value && schemaText.value.trim().length > 0;
+    const hasRawEndpoints = rawEndpoints.value && rawEndpoints.value.trim().length > 0;
+    const hasTestCases = testCases.value && testCases.value.length > 0;
+    const hasTestResults = testResults.value && testResults.value.length > 0;
+    
+    // If session has no input data and no test results, don't save (prevent errors)
+    if (!hasSchemaText && !hasRawEndpoints && !hasTestCases && !hasTestResults) {
+    //  console.log('[Save Session] Skipping save: session is empty (no input data)');
+      return;
+    }
     
     // Convert Sets to Arrays for storage
     currentSession.schemaText = schemaText.value;
@@ -272,6 +468,7 @@ const saveCurrentSession = async () => {
     currentSession.rawEndpoints = rawEndpoints.value;
     currentSession.pathVariableValues = { ...pathVariableValues.value };
     currentSession.queryParameterValues = { ...queryParameterValues.value };
+    currentSession.headerParameterValues = { ...headerParameterValues.value };
     currentSession.bodyVariableValues = { ...bodyVariableValues.value };
     currentSession.customHeaders = customHeaders.value;
     currentSession.variablesExpanded = variablesExpanded.value;
@@ -280,18 +477,20 @@ const saveCurrentSession = async () => {
     currentSession.requestResponseTab = requestResponseTab.value;
     currentSession.testCasePathVariableValues = { ...testCasePathVariableValues.value };
     currentSession.testCaseQueryParameterValues = { ...testCaseQueryParameterValues.value };
+    currentSession.testCaseHeaderParameterValues = { ...testCaseHeaderParameterValues.value };
     currentSession.testCaseBodyVariableValues = { ...testCaseBodyVariableValues.value };
     currentSession.lastModified = new Date().toISOString();
     
-    // Save to Caido project storage
-    await saveSessionsToStorage();
+    // Save only the current session (more efficient)
+    await saveSingleSessionToStorage(currentSession);
   }
 };
 
 const loadSession = async (sessionId: string) => {
   try {
-    //console.log(`loadSession called with sessionId: ${sessionId}`);
-    //console.log(`Available sessions: ${sessions.value.length}`, sessions.value.map(s => ({ id: s.id, name: s.name })));
+    // Set loading flag to prevent auto-save during session load
+    isLoadingSession.value = true;
+    
     
     const session = sessions.value.find(s => s.id === sessionId);
     if (!session) {
@@ -300,6 +499,7 @@ const loadSession = async (sessionId: string) => {
       if (sessions.value.length > 0) {
         currentSessionId.value = sessions.value[0].id;
       }
+      isLoadingSession.value = false;
       return;
     }
     
@@ -314,15 +514,38 @@ const loadSession = async (sessionId: string) => {
       isSchemaLoaded: session.isSchemaLoaded
     });*/
     
-    // Save current session before switching (only if switching to a different session)
-    if (currentSessionId.value && currentSessionId.value !== sessionId) {
-      try {
-        await saveCurrentSession();
-      } catch (saveError) {
-        console.error('Error saving current session before switch:', saveError);
-        // Continue anyway
-      }
-    }
+    // Don't save current session when switching - user will save manually if needed
+    
+    // Clear all state first to prevent stale data from previous session
+  //  console.log(`[Load Session] Clearing state before loading session ${sessionId}`);
+    schemaText.value = '';
+    baseUrl.value = '';
+    testResults.value = [];
+    testCases.value = [];
+    parsedSchema.value = null;
+    isSchemaLoaded.value = false;
+    isRawMode.value = false;
+    rawEndpoints.value = '';
+    inputMode.value = 'schema';
+    pathVariableValues.value = {};
+    queryParameterValues.value = {};
+    headerParameterValues.value = {};
+    bodyVariableValues.value = {};
+    customHeaders.value = '';
+    variablesExpanded.value = false;
+    expandedResults.value = new Set();
+    expandedTestCases.value = new Set();
+    requestResponseTab.value = 'request';
+    testCasePathVariableValues.value = {};
+    testCaseQueryParameterValues.value = {};
+    testCaseHeaderParameterValues.value = {};
+    testCaseBodyVariableValues.value = {};
+    validationResult.value = null;
+    endpointSearchQuery.value = '';
+    filteredTestResults.value = [];
+    testErrorMessage.value = null;
+    runningTests.value.clear();
+    stopTestRequested.value = false;
     
     // Load new session data with safe defaults
     try {
@@ -338,6 +561,7 @@ const loadSession = async (sessionId: string) => {
       inputMode.value = session.isRawMode ? 'raw' : 'schema';
       pathVariableValues.value = session.pathVariableValues && typeof session.pathVariableValues === 'object' ? { ...session.pathVariableValues } : {};
       queryParameterValues.value = session.queryParameterValues && typeof session.queryParameterValues === 'object' ? { ...session.queryParameterValues } : {};
+      headerParameterValues.value = session.headerParameterValues && typeof session.headerParameterValues === 'object' ? { ...session.headerParameterValues } : {};
       bodyVariableValues.value = session.bodyVariableValues && typeof session.bodyVariableValues === 'object' ? { ...session.bodyVariableValues } : {};
       customHeaders.value = session.customHeaders || '';
       variablesExpanded.value = session.variablesExpanded || false;
@@ -346,9 +570,18 @@ const loadSession = async (sessionId: string) => {
       requestResponseTab.value = session.requestResponseTab || 'request';
       testCasePathVariableValues.value = session.testCasePathVariableValues && typeof session.testCasePathVariableValues === 'object' ? { ...session.testCasePathVariableValues } : {};
       testCaseQueryParameterValues.value = session.testCaseQueryParameterValues && typeof session.testCaseQueryParameterValues === 'object' ? { ...session.testCaseQueryParameterValues } : {};
+      testCaseHeaderParameterValues.value = session.testCaseHeaderParameterValues && typeof session.testCaseHeaderParameterValues === 'object' ? { ...session.testCaseHeaderParameterValues } : {};
       testCaseBodyVariableValues.value = session.testCaseBodyVariableValues && typeof session.testCaseBodyVariableValues === 'object' ? { ...session.testCaseBodyVariableValues } : {};
+      
+      /*console.log(`[Load Session] Loaded session data:`, {
+        schemaTextLength: schemaText.value.length,
+        testCasesCount: testCases.value.length,
+        testResultsCount: testResults.value.length,
+        isSchemaLoaded: isSchemaLoaded.value,
+        isRawMode: isRawMode.value
+      }); */
     } catch (dataError) {
-      console.error('Error loading session data:', dataError);
+    //  console.error('[Load Session] Error loading session data:', dataError);
       // Set safe defaults
       schemaText.value = '';
       baseUrl.value = '';
@@ -383,12 +616,17 @@ const loadSession = async (sessionId: string) => {
     
     currentSessionId.value = sessionId;
     //console.log(`Session ${sessionId} loaded successfully. Current session ID: ${currentSessionId.value}`);
+    
+    // Clear loading flag after a short delay to allow all reactive updates to complete
+    await new Promise(resolve => setTimeout(resolve, 100));
+    isLoadingSession.value = false;
   } catch (error) {
     console.error('Critical error in loadSession:', error);
     // Ensure we always have a valid session ID to prevent UI from breaking
     if (sessions.value.length > 0) {
       currentSessionId.value = sessions.value[0].id;
     }
+    isLoadingSession.value = false;
     // Re-throw to let caller handle it
     throw error;
   }
@@ -422,6 +660,10 @@ const handleAddSession = async () => {
   sessions.value.push(newSession);
   await loadSession(newSession.id);
   await saveSessionsToStorage();
+  
+  // Switch to Input tab after reactive state updates
+  await nextTick();
+  activeTab.value = 0; // Input tab
 };
 
 const startRenameSession = (sessionId: string) => {
@@ -465,25 +707,34 @@ const handleRenameKeydown = async (event: KeyboardEvent, sessionId: string) => {
   }
 };
 
-const saveSessionsToStorage = async () => {
+// Save a single session efficiently (only processes schemaText for that session)
+const saveSingleSessionToStorage = async (session: OpenAPISession) => {
   try {
+    // Skip saving if session has no meaningful data
+    const hasSchemaText = session.schemaText && session.schemaText.trim().length > 0;
+    const hasRawEndpoints = session.rawEndpoints && session.rawEndpoints.trim().length > 0;
+    const hasTestCases = session.testCases && session.testCases.length > 0;
+    const hasTestResults = session.testResults && session.testResults.length > 0;
+    
+    if (!hasSchemaText && !hasRawEndpoints && !hasTestCases && !hasTestResults) {
+      console.log('[Save Single Session] Skipping save: session is empty (no input data)');
+      return;
+    }
+    
     // Check openapi env var first, then use currentProjectId (which should be project ID) as fallback
     let projectKey: string;
     try {
       const openapiValue = await sdk.env.getVar('openapi');
       if (openapiValue) {
-        //console.log(`Found 'openapi' env var for saving: ${openapiValue}`);
         projectKey = openapiValue;
         currentProjectId.value = projectKey; // Update currentProjectId to match
       } else {
         // If no env var, use currentProjectId (which should be project ID) as fallback
         if (currentProjectId.value && currentProjectId.value !== 'default') {
           projectKey = currentProjectId.value;
-          //console.log(`No 'openapi' env var found, using currentProjectId as key: ${currentProjectId.value}`);
         } else {
           // Last resort: use 'default' if currentProjectId is not set or is 'default'
           projectKey = 'default';
-          //console.log(`No 'openapi' env var and no valid currentProjectId, using 'default' key`);
         }
       }
     } catch (error) {
@@ -491,15 +742,301 @@ const saveSessionsToStorage = async () => {
       // Fall back to currentProjectId if available
       if (currentProjectId.value && currentProjectId.value !== 'default') {
         projectKey = currentProjectId.value;
-        //console.log(`Using currentProjectId as fallback: ${currentProjectId.value}`);
       } else {
         projectKey = 'default';
-        //console.log(`Using 'default' as fallback`);
       }
     }
     
-    // Convert sessions to serializable format
-    const sessionsData = sessions.value.map(session => {
+    //console.log(`[Save Single Session] Saving session ${session.id} only`);
+    
+    // Step 1: Save schemaText separately for this session only
+    // Only save if schemaText exists and is not empty
+    if (session.schemaText && session.schemaText.trim().length > 0 && session.id) {
+      const schemaTextSize = session.schemaText.length;
+
+      try {
+        // Chunk size: 300KB per chunk (to stay well under RPC limits, accounting for overhead)
+        const CHUNK_SIZE = 1000 * 1024; // 1000KB
+        
+        if (schemaTextSize <= CHUNK_SIZE) {
+          // Small enough to save in one call
+          const result = await sdk.backend.saveSchemaTextToDb(projectKey, session.id, session.schemaText);
+          if (result.kind === "Error") {
+           // console.error(`[Save Single Session] Failed to save schemaText for session ${session.id}:`, result.error);
+          } else {
+            //console.log(`[Save Single Session] Successfully saved schemaText for session ${session.id}`);
+          }
+        } else {
+          // Too large - need to chunk
+          const numChunks = Math.ceil(schemaTextSize / CHUNK_SIZE);
+          const metadata = { chunks: numChunks, totalLength: schemaTextSize };
+          //console.log(`[Save Single Session] Chunking schemaText for session ${session.id} into ${numChunks} chunks`);
+          
+          // Validate required parameters
+          if (!projectKey || !session.id) {
+            console.error(`[Save Single Session] Invalid parameters: projectKey=${projectKey}, sessionId=${session.id}`);
+            throw new Error('Invalid projectKey or sessionId');
+          }
+          
+          // Save chunks sequentially to avoid overwhelming the RPC system
+          for (let i = 0; i < numChunks; i++) {
+            const start = i * CHUNK_SIZE;
+            const end = Math.min(start + CHUNK_SIZE, schemaTextSize);
+            const chunk = session.schemaText.substring(start, end);
+            
+            // Validate chunk is not empty
+            if (!chunk || chunk.length === 0) {
+              console.error(`[Save Single Session] Empty chunk ${i} for session ${session.id}`);
+              throw new Error(`Empty chunk ${i}`);
+            }
+            
+            // Only pass metadata with the first chunk, don't pass undefined for others
+            let result;
+            if (i === 0) {
+              result = await sdk.backend.saveSchemaTextChunk(
+                projectKey, 
+                session.id, 
+                i, 
+                chunk, 
+                metadata
+              );
+            } else {
+              result = await sdk.backend.saveSchemaTextChunk(
+                projectKey, 
+                session.id, 
+                i, 
+                chunk
+              );
+            }
+            
+            if (result.kind === "Error") {
+              console.error(`[Save Single Session] Failed to save chunk ${i} for session ${session.id}:`, result.error);
+              throw new Error(`Failed to save chunk ${i}: ${result.error}`);
+            }
+            
+            //console.log(`[Save Single Session] Saved chunk ${i + 1}/${numChunks} for session ${session.id} (${(chunk.length / 1024).toFixed(2)} KB)`);
+          }
+          
+          //console.log(`[Save Single Session] Successfully saved all ${numChunks} chunks for session ${session.id}`);
+        }
+      } catch (error) {
+        console.error(`[Save Single Session] Exception saving schemaText for session ${session.id}:`, error);
+      }
+    }
+    
+    // Step 2: Load all sessions, update this one, and save all back
+    // (We need to save all sessions because they're stored together)
+    const allSessions = [...sessions.value];
+    
+    // Find and update the session in the array
+    const sessionIndex = allSessions.findIndex(s => s.id === session.id);
+    if (sessionIndex !== -1) {
+      allSessions[sessionIndex] = session;
+    }
+    
+    // Prepare sessions data (exclude schemaText if payload would be too large)
+    const sessionsDataWithSchema = allSessions.map(s => {
+      const serializableSession: any = {};
+      
+      // Copy all properties, handling special cases
+      for (const [key, value] of Object.entries(s)) {
+        // Skip functions and undefined values
+        if (typeof value === 'function' || value === undefined) {
+          continue;
+        }
+        
+        // Convert Sets to arrays
+        if (value instanceof Set) {
+          serializableSession[key] = Array.from(value);
+        } else if (value instanceof Map) {
+          serializableSession[key] = Array.from(value.entries());
+        } else {
+          serializableSession[key] = value;
+        }
+      }
+      
+      return serializableSession;
+    });
+    
+    let payloadJson = JSON.stringify(sessionsDataWithSchema);
+    let payloadSizeMB = parseFloat((payloadJson.length / 1024 / 1024).toFixed(2));
+    const MAX_PAYLOAD_SIZE_MB = 1.6; // 1MB limit
+    
+    //console.log(`[Save Single Session] Prepared ${sessionsDataWithSchema.length} sessions (with schemaText) for saving, payload: ${payloadSizeMB} MB`);
+    
+    // If payload is too large, exclude schemaText
+    let sessionsData = sessionsDataWithSchema;
+    if (payloadSizeMB > MAX_PAYLOAD_SIZE_MB) {
+      console.warn(`[Save Single Session] Payload too large (${payloadSizeMB} MB), excluding schemaText from session data`);
+      schemaTextExcluded.value = true;
+      
+      // Create sessions without schemaText
+      sessionsData = allSessions.map(s => {
+        const serializableSession: any = {};
+        
+        // Copy all properties except schemaText
+        for (const [key, value] of Object.entries(s)) {
+          // Skip functions, undefined values, and schemaText
+          if (typeof value === 'function' || value === undefined || key === 'schemaText') {
+            continue;
+          }
+          
+          // Convert Sets to arrays
+          if (value instanceof Set) {
+            serializableSession[key] = Array.from(value);
+          } else if (value instanceof Map) {
+            serializableSession[key] = Array.from(value.entries());
+          } else {
+            serializableSession[key] = value;
+          }
+        }
+        
+        return serializableSession;
+      });
+      
+      payloadJson = JSON.stringify(sessionsData);
+      payloadSizeMB = parseFloat((payloadJson.length / 1024 / 1024).toFixed(2));
+      //console.log(`[Save Single Session] After excluding schemaText, payload: ${payloadSizeMB} MB`);
+    } else {
+      schemaTextExcluded.value = false;
+    }
+    
+    // Save to Caido database
+    try {
+      const result = await sdk.backend.saveSessionsToDb(projectKey, sessionsData);
+      if (result.kind === "Error") {
+        console.error('[Save Single Session] Failed to save sessions to database:', result.error);
+      } else {
+        //console.log(`[Save Single Session] Successfully saved ${sessionsData.length} sessions to database (schemaText ${schemaTextExcluded.value ? 'excluded' : 'included'})`);
+      }
+    } catch (dbError) {
+      console.error('[Save Single Session] Database save failed:', dbError);
+    }
+    
+  } catch (error) {
+    console.error('[Save Single Session] Failed to save session:', error);
+  }
+};
+
+// Save all sessions (used when adding, deleting, or renaming sessions)
+const saveSessionsToStorage = async () => {
+  try {
+    // Check openapi env var first, then use currentProjectId (which should be project ID) as fallback
+    let projectKey: string;
+    try {
+      const openapiValue = await sdk.env.getVar('openapi');
+      if (openapiValue) {
+        projectKey = openapiValue;
+        currentProjectId.value = projectKey; // Update currentProjectId to match
+      } else {
+        // If no env var, use currentProjectId (which should be project ID) as fallback
+        if (currentProjectId.value && currentProjectId.value !== 'default') {
+          projectKey = currentProjectId.value;
+        } else {
+          // Last resort: use 'default' if currentProjectId is not set or is 'default'
+          projectKey = 'default';
+        }
+      }
+    } catch (error) {
+      console.warn('Failed to get openapi env var:', error);
+      // Fall back to currentProjectId if available
+      if (currentProjectId.value && currentProjectId.value !== 'default') {
+        projectKey = currentProjectId.value;
+      } else {
+        projectKey = 'default';
+      }
+    }
+    
+    //console.log('[Save Sessions] Using batching: saving schemaText separately, then session data');
+    
+    // Step 1: Save schemaText separately for each session (batching to avoid payload size issues)
+    const schemaTextSavePromises: Promise<void>[] = [];
+    for (const session of sessions.value) {
+      if (session.schemaText && session.id) {
+        const schemaTextSize = session.schemaText.length;
+        
+        schemaTextSavePromises.push(
+          (async () => {
+            try {
+              // Chunk size: 300KB per chunk (to stay well under RPC limits, accounting for overhead)
+              const CHUNK_SIZE = 1600 * 1024; // 1600KB
+              
+              if (schemaTextSize <= CHUNK_SIZE) {
+                // Small enough to save in one call
+                const result = await sdk.backend.saveSchemaTextToDb(projectKey, session.id, session.schemaText);
+                if (result.kind === "Error") {
+                //  console.error(`[Save Sessions] Failed to save schemaText for session ${session.id}:`, result.error);
+                } else {
+                  //console.log(`[Save Sessions] Successfully saved schemaText for session ${session.id}`);
+                }
+              } else {
+                // Too large - need to chunk
+                const numChunks = Math.ceil(schemaTextSize / CHUNK_SIZE);
+                const metadata = { chunks: numChunks, totalLength: schemaTextSize };
+                //console.log(`[Save Sessions] Chunking schemaText for session ${session.id} into ${numChunks} chunks`);
+                
+                // Validate required parameters
+                if (!projectKey || !session.id) {
+                 // console.error(`[Save Sessions] Invalid parameters: projectKey=${projectKey}, sessionId=${session.id}`);
+                  throw new Error('Invalid projectKey or sessionId');
+                }
+                
+                // Save chunks sequentially to avoid overwhelming the RPC system
+                for (let i = 0; i < numChunks; i++) {
+                  const start = i * CHUNK_SIZE;
+                  const end = Math.min(start + CHUNK_SIZE, schemaTextSize);
+                  const chunk = session.schemaText.substring(start, end);
+                  
+                  // Validate chunk is not empty
+                  if (!chunk || chunk.length === 0) {
+                  //  console.error(`[Save Sessions] Empty chunk ${i} for session ${session.id}`);
+                    throw new Error(`Empty chunk ${i}`);
+                  }
+                  
+                  // Only pass metadata with the first chunk, don't pass undefined for others
+                  let result;
+                  if (i === 0) {
+                    result = await sdk.backend.saveSchemaTextChunk(
+                      projectKey, 
+                      session.id, 
+                      i, 
+                      chunk, 
+                      metadata
+                    );
+                  } else {
+                    result = await sdk.backend.saveSchemaTextChunk(
+                      projectKey, 
+                      session.id, 
+                      i, 
+                      chunk
+                    );
+                  }
+                  
+                  if (result.kind === "Error") {
+             //       console.error(`[Save Sessions] Failed to save chunk ${i} for session ${session.id}:`, result.error);
+                    throw new Error(`Failed to save chunk ${i}: ${result.error}`);
+                  }
+                  
+                  //console.log(`[Save Sessions] Saved chunk ${i + 1}/${numChunks} for session ${session.id} (${(chunk.length / 1024).toFixed(2)} KB)`);
+                }
+                
+                //console.log(`[Save Sessions] Successfully saved all ${numChunks} chunks for session ${session.id}`);
+              }
+            } catch (error) {
+         //     console.error(`[Save Sessions] Exception saving schemaText for session ${session.id}:`, error);
+            }
+          })()
+        );
+      }
+    }
+    
+    // Wait for all schemaText saves to complete (don't fail if some fail)
+    await Promise.allSettled(schemaTextSavePromises);
+    //console.log(`[Save Sessions] All schemaText saves completed`);
+    
+    // Step 2: Save sessions, but exclude schemaText if payload is too large
+    // First, try with schemaText included
+    const sessionsDataWithSchema = sessions.value.map(session => {
       const serializableSession: any = {};
       
       // Copy all properties, handling special cases
@@ -522,24 +1059,63 @@ const saveSessionsToStorage = async () => {
       return serializableSession;
     });
     
-    // const storageKey = `openapi-sessions-${projectKey}`;
-    //console.log(`Saving sessions for project key: ${projectKey}`);
+    let payloadJson = JSON.stringify(sessionsDataWithSchema);
+    let payloadSizeMB = parseFloat((payloadJson.length / 1024 / 1024).toFixed(2));
+    const MAX_PAYLOAD_SIZE_MB = 1.6; // 1MB limit
+    
+    //console.log(`[Save Sessions] Prepared ${sessionsDataWithSchema.length} sessions (with schemaText) for saving, payload: ${payloadSizeMB} MB`);
+    
+    // If payload is too large, exclude schemaText
+    let sessionsData = sessionsDataWithSchema;
+    if (payloadSizeMB > MAX_PAYLOAD_SIZE_MB) {
+   //   console.warn(`[Save Sessions] Payload too large (${payloadSizeMB} MB), excluding schemaText from session data`);
+      schemaTextExcluded.value = true;
+      
+      // Create sessions without schemaText
+      sessionsData = sessions.value.map(session => {
+        const serializableSession: any = {};
+        
+        // Copy all properties except schemaText
+        for (const [key, value] of Object.entries(session)) {
+          // Skip functions, undefined values, and schemaText
+          if (typeof value === 'function' || value === undefined || key === 'schemaText') {
+            continue;
+          }
+          
+          // Convert Sets to arrays
+          if (value instanceof Set) {
+            serializableSession[key] = Array.from(value);
+          } else if (value instanceof Map) {
+            serializableSession[key] = Array.from(value.entries());
+          } else {
+            serializableSession[key] = value;
+          }
+        }
+        
+        return serializableSession;
+      });
+      
+      payloadJson = JSON.stringify(sessionsData);
+      payloadSizeMB = parseFloat((payloadJson.length / 1024 / 1024).toFixed(2));
+      //console.log(`[Save Sessions] After excluding schemaText, payload: ${payloadSizeMB} MB`);
+    } else {
+      schemaTextExcluded.value = false;
+    }
     
     // Save to Caido database
     try {
       const result = await sdk.backend.saveSessionsToDb(projectKey, sessionsData);
       if (result.kind === "Error") {
-        console.error('Failed to save sessions to database:', result.error);
+      //  console.error('[Save Sessions] Failed to save sessions to database:', result.error);
       } else {
-        // Log database contents after save (debug function)
-        // await sdk.backend.logDatabaseContents();
+        //console.log(`[Save Sessions] Successfully saved ${sessionsData.length} sessions to database (schemaText ${schemaTextExcluded.value ? 'excluded' : 'included'})`);
       }
     } catch (dbError) {
-      console.error('Database save failed:', dbError);
+    //  console.error('[Save Sessions] Database save failed:', dbError);
     }
     
   } catch (error) {
-    console.error('Failed to save sessions:', error);
+  //  console.error('[Save Sessions] Failed to save sessions:', error);
   }
 };
 
@@ -550,7 +1126,7 @@ const loadSessionsFromStorage = async () => {
     try {
       const openapiValue = await sdk.env.getVar('openapi');
       if (openapiValue) {
-        //console.log(`Found 'openapi' env var for loading: ${openapiValue}`);
+        ////console.log(`Found 'openapi' env var for loading: ${openapiValue}`);
         projectKey = openapiValue;
         currentProjectId.value = projectKey; // Update currentProjectId to match
       } else {
@@ -576,7 +1152,7 @@ const loadSessionsFromStorage = async () => {
       }
     }
     
-    const storageKey = `openapi-sessions-${projectKey}`;
+    //const storageKey = `openapi-sessions-${projectKey}`;
     //console.log(`Loading sessions for project key: ${projectKey}`);
     
     let sessionsData = null;
@@ -594,33 +1170,10 @@ const loadSessionsFromStorage = async () => {
       console.error('Database load failed:', dbError);
     }
     
-    // If no sessions found with primary project key, try to find sessions in other project keys
-    if ((!sessionsData || !Array.isArray(sessionsData) || sessionsData.length === 0) && sdk.backend.getAllSessionProjectKeys) {
-      try {
-        //console.log('No sessions found with primary project key, searching for sessions in other project keys...');
-        const allKeysResult = await sdk.backend.getAllSessionProjectKeys();
-        if (allKeysResult.kind === "Ok" && allKeysResult.value && allKeysResult.value.length > 0) {
-          //console.log(`Found ${allKeysResult.value.length} project keys with sessions:`, allKeysResult.value);
-          
-          // Try loading from each project key until we find sessions
-          for (const otherProjectKey of allKeysResult.value) {
-            if (otherProjectKey === projectKey) continue; // Already tried this one
-            
-            //console.log(`Trying to load sessions from project key: ${otherProjectKey}`);
-            const otherResult = await sdk.backend.loadSessionsFromDb(otherProjectKey);
-            if (otherResult.kind === "Ok" && otherResult.value && Array.isArray(otherResult.value) && otherResult.value.length > 0) {
-              //console.log(`Found ${otherResult.value.length} sessions in project key: ${otherProjectKey}`);
-              sessionsData = otherResult.value;
-              // Update currentProjectId to match the project key where we found sessions
-              currentProjectId.value = otherProjectKey;
-              projectKey = otherProjectKey;
-              break;
-            }
-          }
-        }
-      } catch (searchError) {
-        console.error('Failed to search for sessions in other project keys:', searchError);
-      }
+    // Don't load sessions from other projects - only load from the current project key
+    // This prevents cross-contamination between projects
+    if (!sessionsData || !Array.isArray(sessionsData) || sessionsData.length === 0) {
+     // console.log(`[Load Sessions] No sessions found for project key: ${projectKey}`);
     }
     
     // Also check if sessionsData is an object with sessions property
@@ -642,16 +1195,30 @@ const loadSessionsFromStorage = async () => {
     }
     
     if (sessionsData && Array.isArray(sessionsData)) {
-      //console.log(`Processing ${sessionsData.length} sessions...`);
-      /*console.log('First session sample:', sessionsData[0] ? {
-        id: sessionsData[0].id,
-        name: sessionsData[0].name,
-        hasSchemaText: !!sessionsData[0].schemaText,
-        hasTestCases: !!sessionsData[0].testCases,
-        hasTestResults: !!sessionsData[0].testResults
-      } : 'No sessions');*/
+    //  console.log(`[Load Sessions] Processing ${sessionsData.length} sessions...`);
       
       try {
+        // Load schemaText separately for each session (batching)
+     //   console.log(`[Load Sessions] Loading schemaText separately for ${sessionsData.length} sessions`);
+        const schemaTextLoadPromises = sessionsData.map(async (session) => {
+          if (session.id) {
+            try {
+              const result = await sdk.backend.loadSchemaTextFromDb(projectKey, session.id);
+              if (result.kind === "Ok" && result.value) {
+                session.schemaText = result.value;
+             //   console.log(`[Load Sessions] Loaded schemaText for session ${session.id} (${(result.value.length / 1024 / 1024).toFixed(2)} MB)`);
+              } else if (result.kind === "Error") {
+             //   console.warn(`[Load Sessions] Failed to load schemaText for session ${session.id}:`, result.error);
+              }
+            } catch (error) {
+           //   console.error(`[Load Sessions] Exception loading schemaText for session ${session.id}:`, error);
+            }
+          }
+        });
+        
+        await Promise.allSettled(schemaTextLoadPromises);
+    //    console.log(`[Load Sessions] All schemaText loads completed`);
+        
         sessions.value = sessionsData.map(session => {
           try {
             return {
@@ -660,7 +1227,7 @@ const loadSessionsFromStorage = async () => {
               expandedTestCases: new Set(session.expandedTestCases || [])
             };
           } catch (mapError) {
-            console.error('Error mapping session:', mapError, session);
+          //  console.error('[Load Sessions] Error mapping session:', mapError, session);
             // Return a minimal valid session object
             return {
               ...session,
@@ -670,7 +1237,7 @@ const loadSessionsFromStorage = async () => {
           }
         });
         
-        //console.log(`Mapped ${sessions.value.length} sessions to reactive state`);
+    //    console.log(`[Load Sessions] Mapped ${sessions.value.length} sessions to reactive state`);
         
         // Initialize session counter for this project based on existing sessions
         if (sessions.value.length > 0) {
@@ -785,6 +1352,96 @@ const sortedBodyVariables = computed(() => {
   return entries.sort(([keyA], [keyB]) => keyA.localeCompare(keyB));
 });
 
+/*
+// Check if there are raw endpoints without methods
+const hasEndpointsWithoutMethod = computed(() => {
+  if (!isRawMode.value || !rawEndpoints.value.trim()) {
+    return false;
+  }
+  const lines = rawEndpoints.value.split('\n');
+  return lines.some(line => {
+    const parsed = parseRawEndpoint(line.trim());
+    return parsed && !parsed.method;
+  });
+}); */
+
+// Generate raw endpoints text from parsed schema (paths with query variables)
+// This includes ALL paths from the schema, even if they're empty objects (no HTTP methods defined)
+const rawEndpointsText = computed(() => {
+  if (!parsedSchema.value || !parsedSchema.value.paths) {
+    return '';
+  }
+  
+  const endpoints: string[] = [];
+  const seenPaths = new Set<string>();
+  
+  // Iterate through ALL paths in the schema, including empty ones (paths with no HTTP methods)
+  for (const [path, pathItem] of Object.entries(parsedSchema.value.paths)) {
+    // Include ALL paths, even if they're empty objects (no methods defined)
+    // This is valid in OpenAPI - paths can exist without operations
+    if (!pathItem || typeof pathItem !== 'object') {
+      continue;
+    }
+    
+    // Collect all query parameters from path-level parameters (OpenAPI 3.x)
+    const queryParams = new Set<string>();
+    const pathItemAny = pathItem as any;
+    
+    // Check for path-level parameters (OpenAPI 3.x)
+    if (pathItemAny.parameters && Array.isArray(pathItemAny.parameters)) {
+      for (const param of pathItemAny.parameters) {
+        if (param && param.in === 'query' && param.name) {
+          queryParams.add(param.name);
+        }
+      }
+    }
+    
+    // Collect query parameters from all operations for this path
+    // Note: Even if pathItem is empty {}, Object.entries will return empty array, which is fine
+    for (const [method, operation] of Object.entries(pathItemAny)) {
+      // Skip non-operation keys
+      if (['parameters', 'servers', 'summary', 'description', '$ref'].includes(method)) {
+        continue;
+      }
+      
+      if (!operation || typeof operation !== 'object') continue;
+      const operationAny = operation as any;
+      
+      // Get parameters from operation
+      if (operationAny.parameters && Array.isArray(operationAny.parameters)) {
+        for (const param of operationAny.parameters) {
+          if (param && param.in === 'query' && param.name) {
+            queryParams.add(param.name);
+          }
+        }
+      }
+    }
+    
+    // Build the endpoint string - always include the path, even if empty
+    let endpointStr = path;
+    
+    // Add query parameters if any
+    if (queryParams.size > 0) {
+      const queryVars = Array.from(queryParams).sort().map(param => `${param}={${param}}`);
+      endpointStr += '?' + queryVars.join('&');
+    }
+    
+    // Always add the path, even if it has no query parameters and no operations
+    // This ensures all paths from the schema are included in raw endpoints
+    if (!seenPaths.has(endpointStr)) {
+      endpoints.push(endpointStr);
+      seenPaths.add(endpointStr);
+    }
+  }
+  
+  return endpoints.join('\n');
+});
+
+// Toggle raw view in definition tab
+const toggleRawViewInDefinition = () => {
+  showRawInDefinition.value = !showRawInDefinition.value;
+};
+
 //###################################
 // Schema Parsing and Decoding Functions
 //###################################
@@ -894,55 +1551,92 @@ const extractBodyVariables = (schema: any, parsedSchema: any): Record<string, an
 
 const generateTestCasesLocally = (schema: any): any[] => {
   const testCases: any[] = [];
+  const httpMethods = ['get', 'post', 'put', 'delete', 'patch'];
   
   for (const [path, methods] of Object.entries(schema.paths)) {
-    for (const [method, operation] of Object.entries(methods as any)) {
-      if (method.toLowerCase() === 'get' || method.toLowerCase() === 'post' || 
-          method.toLowerCase() === 'put' || method.toLowerCase() === 'delete' || method.toLowerCase() === 'patch') {
-        
-        // Extract path variables from the path
-        const pathVariables = extractPathVariables(path);
-        
-        // Extract body parameters for Swagger 2.0
-        let bodyParameter = null;
-        let bodyVariables: Record<string, any> = {};
-        
-        if (operation.parameters) {
-          for (const param of operation.parameters) {
-            if (param.in === 'body' && param.schema) {
-              bodyParameter = param.schema;
-              // Extract body variables from schema
-              bodyVariables = extractBodyVariables(param.schema, schema);
-              break;
+    const pathItem = methods as any;
+    const pathKeys = Object.keys(pathItem);
+    
+    // Check if path has HTTP methods
+    const hasHttpMethods = pathKeys.some(key => httpMethods.includes(key.toLowerCase()));
+    
+    if (hasHttpMethods) {
+      // Path has HTTP methods - create test cases for each method
+      for (const [method, operation] of Object.entries(pathItem)) {
+        if (httpMethods.includes(method.toLowerCase())) {
+          const operationAny = operation as any;
+          
+          // Extract path variables from the path
+          const pathVariables = extractPathVariables(path);
+          
+          // Extract body parameters for Swagger 2.0
+          let bodyParameter = null;
+          let bodyVariables: Record<string, any> = {};
+          
+          if (operationAny.parameters) {
+            for (const param of operationAny.parameters) {
+              if (param.in === 'body' && param.schema) {
+                bodyParameter = param.schema;
+                // Extract body variables from schema
+                bodyVariables = extractBodyVariables(param.schema, schema);
+                break;
+              }
             }
           }
-        }
-        
-        // For OpenAPI 3.x requestBody
-        if (operation.requestBody?.content) {
-          const content = operation.requestBody.content;
-          const mediaType = Object.keys(content)[0] || 'application/json';
-          const requestBodySchema = content[mediaType]?.schema;
-          if (requestBodySchema) {
-            bodyVariables = extractBodyVariables(requestBodySchema, schema);
+          
+          // For OpenAPI 3.x requestBody
+          if (operationAny.requestBody?.content) {
+            const content = operationAny.requestBody.content;
+            const mediaType = Object.keys(content)[0] || 'application/json';
+            const requestBodySchema = content[mediaType]?.schema;
+            if (requestBodySchema) {
+              bodyVariables = extractBodyVariables(requestBodySchema, schema);
+            }
           }
+          
+          const testCase = {
+            path,
+            method: method.toUpperCase(),
+            name: `${method.toUpperCase()} ${path}`,
+            description: operationAny.summary || operationAny.description || `Test ${method.toUpperCase()} ${path}`,
+            parameters: operationAny.parameters || [],
+            requestBody: operationAny.requestBody || bodyParameter,
+            expectedStatus: getExpectedStatus(operationAny),
+            pathVariables,
+            bodyVariables,
+            originalPath: path,
+            hasNoMethod: false
+          };
+          
+          testCases.push(testCase);
         }
-        
-        const testCase = {
-          path,
-          method: method.toUpperCase(),
-          name: `${method.toUpperCase()} ${path}`,
-          description: operation.summary || operation.description || `Test ${method.toUpperCase()} ${path}`,
-          parameters: operation.parameters || [],
-          requestBody: operation.requestBody || bodyParameter,
-          expectedStatus: getExpectedStatus(operation),
-          pathVariables,
-          bodyVariables,
-          originalPath: path
-        };
-        
-        testCases.push(testCase);
       }
+    } else {
+      // Path has no HTTP methods - create a single test case with NO METHOD flag
+      // Extract path variables from the path
+      const pathVariables = extractPathVariables(path);
+      
+      // Check for path-level parameters (OpenAPI 3.x)
+      let pathLevelParameters: any[] = [];
+      if (pathItem.parameters && Array.isArray(pathItem.parameters)) {
+        pathLevelParameters = pathItem.parameters;
+      }
+      
+      const testCase = {
+        path,
+        method: null, // No method
+        name: `NO METHOD ${path}`,
+        description: `Path with no HTTP methods defined in schema: ${path}`,
+        parameters: pathLevelParameters,
+        requestBody: null,
+        expectedStatus: 200,
+        pathVariables,
+        bodyVariables: {},
+        originalPath: path,
+        hasNoMethod: true // Flag to indicate this path has no methods
+      };
+      
+      testCases.push(testCase);
     }
   }
   
@@ -950,7 +1644,7 @@ const generateTestCasesLocally = (schema: any): any[] => {
 };
 
 // Frontend schema validation function
-// Keep decoding in frontend to avoid RPC payload size issues
+// Keep validation in frontend to avoid RPC payload size issues with formatted JSON
 const validateSchemaLocally = (schemaText: string): { valid: boolean; errors: string[] } => {
   const errors: string[] = [];
   
@@ -960,6 +1654,17 @@ const validateSchemaLocally = (schemaText: string): { valid: boolean; errors: st
     // Check for OpenAPI or Swagger version field
     if (!schema.openapi && !schema.swagger) {
       errors.push("Missing 'openapi' or 'swagger' version field");
+    }
+    
+    if (!schema.info) {
+      errors.push("Missing 'info' section");
+    } else {
+      if (!schema.info.title) errors.push("Missing 'info.title'");
+      if (!schema.info.version) errors.push("Missing 'info.version'");
+    }
+    
+    if (!schema.paths || Object.keys(schema.paths).length === 0) {
+      errors.push("Missing or empty 'paths' section");
     }
     
     // Additional validation
@@ -985,7 +1690,7 @@ const validateSchemaLocally = (schemaText: string): { valid: boolean; errors: st
   } catch (error) {
     return {
       valid: false,
-      errors: [`Invalid JSON: ${error}`]
+      errors: [`Invalid JSON: ${error instanceof Error ? error.message : String(error)}`]
     };
   }
 };
@@ -1130,6 +1835,23 @@ const loadSchema = async () => {
         queryParameterValues.value[param] = [''];
       });
       
+      // Initialize header parameter values
+      const allHeaderParameters = new Set<string>();
+      cases.forEach(testCase => {
+        if (testCase.parameters && Array.isArray(testCase.parameters)) {
+          testCase.parameters.forEach((param: any) => {
+            if (param.in === 'header' && param.name && typeof param.name === 'string') {
+              allHeaderParameters.add(param.name);
+            }
+          });
+        }
+      });
+      
+      headerParameterValues.value = {};
+      allHeaderParameters.forEach(param => {
+        headerParameterValues.value[param] = [''];
+      });
+      
       // Initialize body variable values
       bodyVariableValues.value = {};
       cases.forEach(testCase => {
@@ -1143,6 +1865,7 @@ const loadSchema = async () => {
       // Initialize test case specific variable values
       testCasePathVariableValues.value = {};
       testCaseQueryParameterValues.value = {};
+      testCaseHeaderParameterValues.value = {};
       testCaseBodyVariableValues.value = {};
       
       cases.forEach(testCase => {
@@ -1162,6 +1885,16 @@ const loadSchema = async () => {
           testCase.parameters.forEach((param: any) => {
             if (param.in === 'query' && param.name) {
               testCaseQueryParameterValues.value[testCaseId][param.name] = '';
+            }
+          });
+        }
+        
+        // Initialize header parameters
+        if (testCase.parameters) {
+          testCaseHeaderParameterValues.value[testCaseId] = {};
+          testCase.parameters.forEach((param: any) => {
+            if (param.in === 'header' && param.name) {
+              testCaseHeaderParameterValues.value[testCaseId][param.name] = '';
             }
           });
         }
@@ -1221,11 +1954,13 @@ const loadRawEndpoints = async () => {
     
     // No query parameters or body variables in raw mode
     queryParameterValues.value = {};
+    headerParameterValues.value = {};
     bodyVariableValues.value = {};
     
     // Initialize test case specific variable values
     testCasePathVariableValues.value = {};
     testCaseQueryParameterValues.value = {};
+    testCaseHeaderParameterValues.value = {};
     testCaseBodyVariableValues.value = {};
     
     cases.forEach(testCase => {
@@ -1241,6 +1976,142 @@ const loadRawEndpoints = async () => {
     });
   } catch (error) {
     console.error("Failed to load raw endpoints:", error);
+  }
+};
+
+// Stop determine operation
+const stopDetermine = () => {
+  determineStopFlag.value.stop = true;
+  isDetermining.value = false;
+};
+
+// Determine HTTP methods for endpoints without methods
+const determineMethods = async () => {
+//  console.log('[Determine Methods] Starting determine methods');
+ // console.log('[Determine Methods] rawEndpoints:', rawEndpoints.value);
+ // console.log('[Determine Methods] baseUrl:', baseUrl.value);
+  
+  if (!rawEndpoints.value.trim() || !baseUrl.value.trim()) {
+  //  console.log('[Determine Methods] Missing required inputs - rawEndpoints or baseUrl is empty');
+    return;
+  }
+
+  try {
+    isDetermining.value = true;
+    determineStopFlag.value.stop = false;
+    determinedResults.value = "";
+
+    // Parse raw endpoints to get only those without methods
+    const lines = rawEndpoints.value.split('\n');
+  //  console.log('[Determine Methods] Parsing', lines.length, 'lines from rawEndpoints');
+    const endpointsWithoutMethod: string[] = [];
+    const allEndpoints: string[] = [];
+
+    for (const line of lines) {
+      const parsed = parseRawEndpoint(line.trim());
+      if (parsed) {
+        allEndpoints.push(parsed.path);
+        if (!parsed.method) {
+          endpointsWithoutMethod.push(parsed.path);
+        }
+      }
+    }
+
+  //  console.log('[Determine Methods] Total endpoints found:', allEndpoints.length);
+  //  console.log('[Determine Methods] Endpoints without method:', endpointsWithoutMethod.length);
+  //  console.log('[Determine Methods] Endpoints without method list:', endpointsWithoutMethod);
+
+    // Use endpoints without methods if available, otherwise use all endpoints
+    const endpointsToCheck = endpointsWithoutMethod.length > 0 ? endpointsWithoutMethod : allEndpoints;
+
+    if (endpointsToCheck.length === 0) {
+  //    console.log('[Determine Methods] No valid endpoints found to check');
+      determinedResults.value = "No valid endpoints found to check.";
+      isDetermining.value = false;
+      return;
+    }
+
+  //  console.log('[Determine Methods] Endpoints to check:', endpointsToCheck.length, endpointsToCheck);
+
+    // Parse custom headers
+    const headers = parseCustomHeaders();
+  //  console.log('[Determine Methods] Custom headers:', headers);
+ //   console.log('[Determine Methods] Timeout:', timeout.value);
+
+    // Call backend to determine methods
+  //  console.log('[Determine Methods] Calling backend determineMethodsForEndpoints...');
+    const results = await sdk.backend.determineMethodsForEndpoints(
+      endpointsToCheck,
+      baseUrl.value,
+      {
+        timeout: timeout.value,
+        headers: headers,
+        stopFlag: determineStopFlag.value
+      }
+    );
+
+  //  console.log('[Determine Methods] Backend returned', results.length, 'results');
+ //   console.log('[Determine Methods] Raw results:', JSON.stringify(results, null, 2));
+
+    // Format results: [METHOD] Path (one per line)
+    const formattedResults: string[] = [];
+    let endpointsWithMethods = 0;
+    let endpointsWithoutMethods = 0;
+    
+    for (const result of results) {
+  //    console.log('[Determine Methods] Processing result:', result.path, 'methods:', result.methods);
+      if (result.methods && result.methods.length > 0) {
+        endpointsWithMethods++;
+        // Create one line per method
+        for (const method of result.methods) {
+          formattedResults.push(`[${method}] ${result.path}`);
+        }
+      } else {
+        endpointsWithoutMethods++;
+     //   console.log('[Determine Methods] Skipping result with no methods:', result.path);
+      }
+      // Skip results with no methods (don't show UNKNOWN)
+    }
+
+  //  console.log('[Determine Methods] Formatted results count:', formattedResults.length);
+ //   console.log('[Determine Methods] Endpoints with methods:', endpointsWithMethods, 'Endpoints without methods:', endpointsWithoutMethods);
+//    console.log('[Determine Methods] Formatted results:', formattedResults);
+    
+    // If no methods were found, show a helpful message
+    if (formattedResults.length === 0) {
+      if (results.length === 0) {
+        determinedResults.value = "No endpoints were processed.";
+      } else {
+        determinedResults.value = `No HTTP methods were found for ${results.length} endpoint(s).\n\n` +
+          `This usually means:\n` +
+          `- The endpoint returned an error (404, 500, etc.)\n` +
+          `- The server doesn't support OPTIONS requests\n` +
+          `- The server doesn't include an Allow header in the OPTIONS response\n` +
+          `- The endpoint path may be incorrect\n\n` +
+          `Checked endpoints:\n${results.map(r => `  - ${r.path}`).join('\n')}`;
+      }
+    } else {
+      determinedResults.value = formattedResults.join('\n');
+      if (endpointsWithoutMethods > 0) {
+        determinedResults.value += `\n\nNote: ${endpointsWithoutMethods} endpoint(s) returned no methods.`;
+      }
+    }
+    
+    // Switch to Determine tab
+    // Tab order in raw mode: Input(0), Endpoints(1), Results(2), Determine(3)
+    // The Determine tab is only shown in raw mode (v-if="isRawMode")
+    if (isRawMode.value) {
+  //    console.log('[Determine Methods] Switching to Determine tab (index 3)');
+      activeTab.value = 3;
+    }
+  } catch (error) {
+  //  console.error("[Determine Methods] Failed to determine methods:", error);
+ //   console.error("[Determine Methods] Error details:", error instanceof Error ? error.stack : 'No stack trace');
+    determinedResults.value = `Error: ${error instanceof Error ? error.message : 'Unknown error'}`;
+  } finally {
+ //   console.log('[Determine Methods] Finished, setting isDetermining to false');
+    isDetermining.value = false;
+    determineStopFlag.value.stop = false;
   }
 };
 
@@ -1370,7 +2241,8 @@ const runAllTests = async () => {
       if (pathVariableCombinations.length === 0 && bodyVariableCombinations.length === 0) {
         const bodyVars = getTestCaseBodyVariables(testCase);
         const queryVars = getTestCaseQueryParameters(testCase);
-        const result = await sdk.backend.runSingleTest(toMinimalTestCase(testCase), baseUrl.value, options, {}, bodyVars, queryVars);
+        const headerVars = getTestCaseHeaderParameters(testCase);
+        const result = await sdk.backend.runSingleTest(toMinimalTestCase(testCase), baseUrl.value, options, {}, bodyVars, queryVars, headerVars);
         updateTestCaseResult(testCase, result);
       } else {
         // Generate all combinations of path and body variables
@@ -1401,7 +2273,8 @@ const runAllTests = async () => {
           if (stopTestRequested.value) break;
           
           const queryVars = getTestCaseQueryParameters(testCase);
-          const result = await sdk.backend.runSingleTest(toMinimalTestCase(testCase), baseUrl.value, options, pathVars, bodyVars, queryVars);
+          const headerVars = getTestCaseHeaderParameters(testCase);
+          const result = await sdk.backend.runSingleTest(toMinimalTestCase(testCase), baseUrl.value, options, pathVars, bodyVars, queryVars, headerVars);
           updateTestCaseResult(testCase, result, pathVars);
           
           // Add delay between requests if specified
@@ -1453,7 +2326,8 @@ const runSingleTest = async (testCase: any) => {
     if (pathVariableCombinations.length === 0 && bodyVariableCombinations.length === 0) {
       const bodyVars = getTestCaseBodyVariables(testCase);
       const queryVars = getTestCaseQueryParameters(testCase);
-      const result = await sdk.backend.runSingleTest(toMinimalTestCase(testCase), baseUrl.value, options, {}, bodyVars, queryVars);
+      const headerVars = getTestCaseHeaderParameters(testCase);
+      const result = await sdk.backend.runSingleTest(toMinimalTestCase(testCase), baseUrl.value, options, {}, bodyVars, queryVars, headerVars);
       updateTestCaseResult(testCase, result);
     } else {
       // Generate all combinations of path and body variables
@@ -1484,7 +2358,8 @@ const runSingleTest = async (testCase: any) => {
         if (stopTestRequested.value) break;
         
         const queryVars = getTestCaseQueryParameters(testCase);
-        const result = await sdk.backend.runSingleTest(toMinimalTestCase(testCase), baseUrl.value, options, pathVars, bodyVars, queryVars);
+        const headerVars = getTestCaseHeaderParameters(testCase);
+        const result = await sdk.backend.runSingleTest(toMinimalTestCase(testCase), baseUrl.value, options, pathVars, bodyVars, queryVars, headerVars);
         updateTestCaseResult(testCase, result, pathVars);
         
         // Add delay between requests if specified
@@ -1559,6 +2434,7 @@ const runAllMethods = async (testCase: any) => {
       // This ensures all methods use the same variable values
       const bodyVars = getTestCaseBodyVariables(testCase);
       const queryVars = getTestCaseQueryParameters(testCase);
+      const headerVars = getTestCaseHeaderParameters(testCase);
       
       // Get path variables from the original test case
       const pathVars: Record<string, string> = {};
@@ -1582,7 +2458,8 @@ const runAllMethods = async (testCase: any) => {
         options,
         pathVars,
         bodyVars,
-        queryVars
+        queryVars,
+        headerVars
       );
 
       // For raw endpoints, don't create new test case entries - just store results directly
@@ -1653,16 +2530,25 @@ const generatePathVariableCombinations = (testCase: any): Record<string, string>
     let values: string[] = [];
     
     // First check test case specific values (primary)
-    if (testCasePathVariableValues.value[testCaseId]?.[variable]) {
-      const testCaseValue = testCasePathVariableValues.value[testCaseId][variable].trim();
+    // Check if the value exists (even if it's an empty string, we need to check it explicitly)
+    const testCaseValueObj = testCasePathVariableValues.value[testCaseId];
+    if (testCaseValueObj && variable in testCaseValueObj) {
+      const testCaseValue = String(testCaseValueObj[variable] || '').trim();
       if (testCaseValue !== '') {
+        // Local override exists and is not empty - use ONLY this value (single test)
         values = [testCaseValue];
+        console.log(`[Path Combinations] Using local override for ${variable}: "${testCaseValue}" (1 combination)`);
+      } else {
+        // Local override exists but is empty - don't use global values, use empty string
+        values = [''];
+        console.log(`[Path Combinations] Local override for ${variable} is empty, using empty string`);
       }
     }
     
-    // If no test case values, check sidebar values (fallback)
+    // If no test case values (no local override), check sidebar values (fallback)
     if (values.length === 0 && pathVariableValues.value[variable] && pathVariableValues.value[variable].length > 0) {
       values = pathVariableValues.value[variable].filter(v => v.trim() !== '');
+      console.log(`[Path Combinations] Using global values for ${variable}: ${values.length} values`);
     }
     
     if (values.length === 0) {
@@ -1695,6 +2581,7 @@ const generatePathVariableCombinations = (testCase: any): Record<string, string>
   };
   
   generateCombinations({}, 0);
+  console.log(`[Path Combinations] Generated ${combinations.length} combinations for test case ${testCaseId}`);
   return combinations;
 };
 
@@ -2170,6 +3057,39 @@ const handleQueryParameterPaste = (param: string, event: ClipboardEvent) => {
   }
 };
 
+const getHeaderParameterValue = (param: string) => {
+  return headerParameterValues.value[param] || [''];
+};
+
+const addHeaderParameterValue = (param: string) => {
+  if (!headerParameterValues.value[param]) {
+    headerParameterValues.value[param] = [''];
+  } else {
+    headerParameterValues.value[param].push('');
+  }
+};
+
+const removeHeaderParameterValue = (param: string, index: number) => {
+  if (headerParameterValues.value[param] && headerParameterValues.value[param].length > 1) {
+    headerParameterValues.value[param].splice(index, 1);
+  }
+};
+
+const handleHeaderParameterPaste = (param: string, event: ClipboardEvent) => {
+  const pastedText = event.clipboardData?.getData('text') || '';
+  const lines = parseMultiLineInput(pastedText);
+  
+  if (lines.length > 1) {
+    event.preventDefault();
+    
+    if (!headerParameterValues.value[param]) {
+      headerParameterValues.value[param] = [];
+    }
+    
+    headerParameterValues.value[param].push(...lines);
+  }
+};
+
 const addBodyVariableValue = (variable: string) => {
   if (!bodyVariableValues.value[variable]) {
     bodyVariableValues.value[variable] = [''];
@@ -2272,6 +3192,20 @@ const getUniqueQueryParameters = () => {
     if (testCase.parameters && Array.isArray(testCase.parameters)) {
       testCase.parameters.forEach((param: any) => {
         if (param.in === 'query' && param.name && typeof param.name === 'string') {
+          params.add(param.name);
+        }
+      });
+    }
+  });
+  return Array.from(params).sort((a, b) => a.localeCompare(b));
+};
+
+const getUniqueHeaderParameters = () => {
+  const params = new Set<string>();
+  testCases.value.forEach(testCase => {
+    if (testCase.parameters && Array.isArray(testCase.parameters)) {
+      testCase.parameters.forEach((param: any) => {
+        if (param.in === 'header' && param.name && typeof param.name === 'string') {
           params.add(param.name);
         }
       });
@@ -2408,6 +3342,13 @@ const getTestCaseQueryParameters = (testCase: any) => {
   const testCaseId = getTestCaseId(testCase);
   const queryVars: Record<string, string> = {};
   
+  // Debug: Log all parameters to see what we're working with
+  if (testCase.parameters && testCase.parameters.length > 0) {
+    const queryParams = testCase.parameters.filter((p: any) => p.in === 'query');
+    console.log(`[Query Params] Test case ${testCaseId} has ${queryParams.length} query parameters:`, 
+      queryParams.map((p: any) => `${p.name} (in: ${p.in})`));
+  }
+  
   // Start with default query parameters from schema
   if (testCase.parameters) {
     testCase.parameters.forEach((param: any) => {
@@ -2422,6 +3363,7 @@ const getTestCaseQueryParameters = (testCase: any) => {
           defaultValue = String(param.schema.default);
         }
         queryVars[param.name] = defaultValue;
+        console.log(`[Query Params] Added query param ${param.name} with default value: "${defaultValue}"`);
       }
     });
   }
@@ -2435,6 +3377,7 @@ const getTestCaseQueryParameters = (testCase: any) => {
           const globalValues = queryParameterValues.value[param.name];
           if (globalValues && globalValues.length > 0 && globalValues[0].trim() !== '') {
             queryVars[param.name] = globalValues[0];
+            console.log(`[Query Params] Overrode ${param.name} with global value: "${globalValues[0]}"`);
           }
         }
       }
@@ -2446,11 +3389,62 @@ const getTestCaseQueryParameters = (testCase: any) => {
     Object.entries(testCaseQueryParameterValues.value[testCaseId]).forEach(([key, value]) => {
       if (value !== undefined && value !== '') {
         queryVars[key] = value;
+        console.log(`[Query Params] Overrode ${key} with test case specific value: "${value}"`);
       }
     });
   }
   
+  console.log(`[Query Params] Final query vars for test case ${testCaseId}:`, Object.keys(queryVars));
   return queryVars;
+};
+
+const getTestCaseHeaderParameters = (testCase: any) => {
+  const testCaseId = getTestCaseId(testCase);
+  const headerVars: Record<string, string> = {};
+  
+  // Start with default header parameters from schema
+  if (testCase.parameters) {
+    testCase.parameters.forEach((param: any) => {
+      if (param.in === 'header' && param.name) {
+        // Use example or default value from schema
+        let defaultValue = '';
+        if (param.example !== undefined) {
+          defaultValue = String(param.example);
+        } else if (param.schema?.example !== undefined) {
+          defaultValue = String(param.schema.example);
+        } else if (param.schema?.default !== undefined) {
+          defaultValue = String(param.schema.default);
+        }
+        headerVars[param.name] = defaultValue;
+      }
+    });
+  }
+  
+  // Override with global header parameter values (sidebar values) as fallback
+  if (testCase.parameters) {
+    testCase.parameters.forEach((param: any) => {
+      if (param.in === 'header' && param.name) {
+        // Check global header parameter values if test case specific value is not set
+        if (!testCaseHeaderParameterValues.value[testCaseId]?.[param.name]) {
+          const globalValues = headerParameterValues.value[param.name];
+          if (globalValues && globalValues.length > 0 && globalValues[0].trim() !== '') {
+            headerVars[param.name] = globalValues[0];
+          }
+        }
+      }
+    });
+  }
+  
+  // Override with test case specific values (highest priority)
+  if (testCaseHeaderParameterValues.value[testCaseId]) {
+    Object.entries(testCaseHeaderParameterValues.value[testCaseId]).forEach(([key, value]) => {
+      if (value !== undefined && value !== '') {
+        headerVars[key] = value;
+      }
+    });
+  }
+  
+  return headerVars;
 };
 
 const getResultId = (data: any) => {
@@ -2505,6 +3499,72 @@ const stopAllTests = () => {
 
 const resetStopFlag = () => {
   stopTestRequested.value = false;
+};
+
+// Download schema function
+const downloadSchema = () => {
+  try {
+    // First, try to get schemaText from current session
+    let schemaToDownload = schemaText.value;
+    
+    // If schemaText is empty, try to reconstruct from parsed schema
+    if (!schemaToDownload && parsedSchema.value) {
+      console.log('[Download Schema] Reconstructing schema from parsed data');
+      // Reconstruct a minimal OpenAPI schema from parsed data
+      const reconstructed: any = {
+        openapi: parsedSchema.value.openapi || '3.0.0',
+        info: parsedSchema.value.info || { title: 'API', version: '1.0.0' },
+        paths: {}
+      };
+      
+      // Reconstruct paths from test cases
+      if (testCases.value && testCases.value.length > 0) {
+        testCases.value.forEach((testCase: any) => {
+          if (!reconstructed.paths[testCase.path]) {
+            reconstructed.paths[testCase.path] = {};
+          }
+          if (testCase.method) {
+            reconstructed.paths[testCase.path][testCase.method.toLowerCase()] = {
+              summary: testCase.name || `${testCase.method} ${testCase.path}`,
+              responses: {
+                '200': { description: 'Success' }
+              }
+            };
+          }
+        });
+      } else if (parsedSchema.value.paths) {
+        // Use parsed schema paths if available
+        reconstructed.paths = parsedSchema.value.paths;
+      }
+      
+      // Add components if available
+      if (parsedSchema.value.components) {
+        reconstructed.components = parsedSchema.value.components;
+      }
+      
+      schemaToDownload = JSON.stringify(reconstructed, null, 2);
+    }
+    
+    if (!schemaToDownload) {
+      console.warn('[Download Schema] No schema available to download');
+      return;
+    }
+    
+    // Create a blob and download
+    const blob = new Blob([schemaToDownload], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `openapi-schema-${currentSessionId.value || 'schema'}-${Date.now()}.json`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+    
+    console.log('[Download Schema] Schema downloaded successfully');
+  } catch (error) {
+    console.error('[Download Schema] Failed to download schema:', error);
+  }
 };
 
 
@@ -2766,11 +3826,6 @@ const saveResultsToStorage = async () => {
       console.error('Database save failed:', dbError);
     }
     
-    // Keep localStorage code for later migration (commented out but preserved)
-    // TODO: Remove localStorage code after migration button is implemented
-    /*
-    localStorage.setItem('openapi-testing-results', JSON.stringify(dataToSave));
-    */
   } catch (error) {
     // Silent fail if database is not available
   }
@@ -2794,20 +3849,6 @@ const loadResultsFromStorage = async () => {
       console.error('Database load failed:', dbError);
     }
     
-    // Keep localStorage code for later migration (commented out but preserved)
-    // TODO: Remove localStorage code after migration button is implemented
-    /*
-    const saved = localStorage.getItem('openapi-testing-results');
-    if (saved) {
-      const data = JSON.parse(saved);
-      // Only load if data is recent (within last hour)
-      if (data.timestamp && (Date.now() - data.timestamp) < 3600000) {
-        allTestResults.value = data.allTestResults || [];
-        testResults.value = data.testResults || [];
-        filteredTestResults.value = data.filteredTestResults || [];
-      }
-    }
-    */
   } catch (error) {
     // Silent fail if database is not available
   }
@@ -2822,7 +3863,11 @@ watch([allTestResults, testResults, filteredTestResults], () => {
 
 // Save session whenever key values change (with debounce to avoid too many saves)
 let saveTimeout: ReturnType<typeof setTimeout> | null = null;
-watch([schemaText, baseUrl, workers, delayBetweenRequests, timeout, useRandomValues, useParameterFromDefinition, pathVariableValues, queryParameterValues, bodyVariableValues, customHeaders, testCases, testResults], () => {
+watch([schemaText, baseUrl, workers, delayBetweenRequests, timeout, useRandomValues, useParameterFromDefinition, pathVariableValues, queryParameterValues, headerParameterValues, bodyVariableValues, customHeaders, testCases, testResults], () => {
+  // Don't auto-save if we're currently loading a session or switching projects
+  if (isLoadingSession.value) {
+    return;
+  }
   if (saveTimeout) clearTimeout(saveTimeout);
   saveTimeout = setTimeout(async () => {
     await saveCurrentSession();
@@ -2884,22 +3929,63 @@ onMounted(async () => {
           await saveSessionsToStorage();
         }
         
+        // Set loading flag to prevent auto-save during project switch
+        isLoadingSession.value = true;
+        
         // Now switch to the new project
         currentProjectId.value = newProjectKey;
-        //console.log('Set currentProjectId to:', newProjectKey);
+        console.log(`[Project Change] Switched from ${oldProjectId} to ${newProjectKey}`);
+        
+        // Clear ALL state before loading new project's sessions
+        console.log('[Project Change] Clearing all state before loading new project');
+        schemaText.value = '';
+        baseUrl.value = '';
+        testResults.value = [];
+        testCases.value = [];
+        parsedSchema.value = null;
+        isSchemaLoaded.value = false;
+        isRawMode.value = false;
+        rawEndpoints.value = '';
+        inputMode.value = 'schema';
+        pathVariableValues.value = {};
+        queryParameterValues.value = {};
+        headerParameterValues.value = {};
+        bodyVariableValues.value = {};
+        customHeaders.value = '';
+        variablesExpanded.value = false;
+        expandedResults.value = new Set();
+        expandedTestCases.value = new Set();
+        requestResponseTab.value = 'request';
+        testCasePathVariableValues.value = {};
+        testCaseQueryParameterValues.value = {};
+        testCaseHeaderParameterValues.value = {};
+        testCaseBodyVariableValues.value = {};
+        validationResult.value = null;
+        endpointSearchQuery.value = '';
+        allTestResults.value = [];
+        filteredTestResults.value = [];
+        testErrorMessage.value = null;
+        runningTests.value.clear();
+        stopTestRequested.value = false;
+        schemaTextExcluded.value = false;
         
         // Clear current sessions before loading new ones
         sessions.value = [];
         currentSessionId.value = null;
         
         // Load sessions for the new project
-        //console.log('Loading sessions for new project:', newProjectKey);
+        console.log(`[Project Change] Loading sessions for new project: ${newProjectKey}`);
         await loadSessionsFromStorage();
+        
+        // Clear loading flag after sessions are loaded
+        await new Promise(resolve => setTimeout(resolve, 200));
+        isLoadingSession.value = false;
       } else {
         //console.log('Project key unchanged, no action needed');
       }
     } catch (error) {
       console.error('Failed to handle project change:', error);
+      isLoadingSession.value = false;
     }
   };
   
@@ -2950,6 +4036,20 @@ onMounted(async () => {
     // Continue anyway
   }
   
+  // Fix accessibility warning: remove focus from elements in hidden tabs
+  watch(activeTab, () => {
+    nextTick(() => {
+      // Find all elements with aria-hidden="true" and remove focus from their descendants
+      const hiddenElements = document.querySelectorAll('[aria-hidden="true"]');
+      hiddenElements.forEach((element) => {
+        const focusedElement = element.querySelector(':focus');
+        if (focusedElement && focusedElement instanceof HTMLElement) {
+          (focusedElement as HTMLElement).blur();
+        }
+      });
+    });
+  });
+
   // Set up auto-save functionality
   const autoSaveInterval = setInterval(async () => {
     await saveCurrentSession();
@@ -2972,6 +4072,9 @@ onMounted(async () => {
   // Cleanup on unmount
   onUnmounted(async () => {
     clearInterval(autoSaveInterval);
+    if (schemaUpdateTimeout) {
+      clearTimeout(schemaUpdateTimeout);
+    }
     if (projectChangeHandler) {
       projectChangeHandler.stop(); // Stop listening to project changes
     }
@@ -3364,22 +4467,27 @@ const checkMigrationStatus = async () => {
 
     <div class="flex-1 flex overflow-hidden">
       <div class="flex-1 overflow-y-auto transition-all duration-300 ease-in-out">
-        <div class="p-4">
-          <TabView v-model:activeIndex="activeTab" class="h-full">
+        <div class="p-4" style=" ">
+          <TabView v-model:activeIndex="activeTab" class="h-full" :pt="{
+            root: { style: 'position: relative;' },
+            navContainer: { style: 'position: relative;' },
+            nav: { style: 'position: relative;' },
+            panelContainer: { style: 'position: relative; background-color: #30333b;' }
+          }">
             <TabPanel header="Input">
               <InputTab 
                 :baseUrl="baseUrl"
                 :schemaText="schemaText"
                 :validationResult="validationResult"
-                :inputMode="inputMode"
                 :rawEndpoints="rawEndpoints"
+                :schemaTextExcluded="schemaTextExcluded"
                 @update:baseUrl="baseUrl = $event"
-                @update:schemaText="schemaText = $event"
-                @update:inputMode="inputMode = $event"
+                @update:schemaText="handleSchemaTextUpdate"
                 @update:rawEndpoints="rawEndpoints = $event"
                 @validate="validateSchema"
                 @loadSchema="loadSchema"
                 @loadRawEndpoints="loadRawEndpoints"
+                @downloadSchema="downloadSchema"
               />
             </TabPanel>
             <TabPanel header="Endpoints">
@@ -3394,6 +4502,7 @@ const checkMigrationStatus = async () => {
                 :displayTestCases="displayTestCases"
                 :testCasePathVariableValues="testCasePathVariableValues"
                 :testCaseQueryParameterValues="testCaseQueryParameterValues"
+                :testCaseHeaderParameterValues="testCaseHeaderParameterValues"
                 :testCaseBodyVariableValues="testCaseBodyVariableValues"
                 :isTestCaseExpanded="isTestCaseExpanded"
                 :isTestRunning="isTestRunning"
@@ -3402,6 +4511,8 @@ const checkMigrationStatus = async () => {
                 :getStatusIcon="getStatusIcon"
                 :getTestCaseId="getTestCaseId"
                 :testErrorMessage="testErrorMessage"
+                :isRawMode="isRawMode"
+                :isDetermining="isDetermining"
                 @update:baseUrl="baseUrl = $event"
                 @update:customHeaders="customHeaders = $event"
                 @update:useRandomValues="useRandomValues = $event"
@@ -3413,8 +4524,11 @@ const checkMigrationStatus = async () => {
                 @runAllMethods="runAllMethods"
                 @clearEndpointSearch="clearEndpointSearch"
                 @clearTestError="testErrorMessage = null"
+                @determineMethods="determineMethods"
+                @stopDetermine="stopDetermine"
                 @updateTestCasePathVariable="(tc, v, val) => { if (!testCasePathVariableValues[getTestCaseId(tc)]) testCasePathVariableValues[getTestCaseId(tc)] = {}; testCasePathVariableValues[getTestCaseId(tc)][v] = val; }"
                 @updateTestCaseQueryParameter="(tc, p, val) => { if (!testCaseQueryParameterValues[getTestCaseId(tc)]) testCaseQueryParameterValues[getTestCaseId(tc)] = {}; testCaseQueryParameterValues[getTestCaseId(tc)][p] = val; }"
+                @updateTestCaseHeaderParameter="(tc, p, val) => { if (!testCaseHeaderParameterValues[getTestCaseId(tc)]) testCaseHeaderParameterValues[getTestCaseId(tc)] = {}; testCaseHeaderParameterValues[getTestCaseId(tc)][p] = val; }"
                 @updateTestCaseBodyVariable="(tc, k, val) => { if (!testCaseBodyVariableValues[getTestCaseId(tc)]) testCaseBodyVariableValues[getTestCaseId(tc)] = {}; testCaseBodyVariableValues[getTestCaseId(tc)][k] = val; }"
               />
             </TabPanel>
@@ -3426,8 +4540,12 @@ const checkMigrationStatus = async () => {
                 :getMethodColor="getMethodColor"
                 :isPathExpanded="isPathExpanded"
                 :isComponentExpanded="isComponentExpanded"
+                :showRaw="showRawInDefinition"
+                :rawEndpointsText="rawEndpointsText"
                 @togglePathExpansion="togglePathExpansion"
                 @toggleComponentExpansion="toggleComponentExpansion"
+                @toggleRawView="toggleRawViewInDefinition"
+                @update:rawEndpointsText="() => {}"
               />
             </TabPanel>
             <TabPanel header="Results">
@@ -3448,14 +4566,23 @@ const checkMigrationStatus = async () => {
                 @toggleResultExpansion="toggleResultExpansion"
               />
             </TabPanel>
+            <TabPanel v-if="isRawMode" header="Determine">
+              <DetermineTab
+                :determinedResults="determinedResults"
+                :isDetermining="isDetermining"
+                @update:determinedResults="determinedResults = $event"
+                @clearResults="determinedResults = ''"
+                @copyToClipboard="() => { if (determinedResults) navigator.clipboard.writeText(determinedResults); }"
+              />
+            </TabPanel>
           </TabView>
         </div>
       </div>
-      <div v-if="isSchemaLoaded && (getUniquePathVariables().length > 0 || getUniqueQueryParameters().length > 0 || Object.keys(bodyVariableValues).length > 0)" :class="['w-80 bg-white dark:bg-gray-800 border-l border-gray-200 dark:border-gray-700 shadow-lg transition-all duration-300 ease-in-out overflow-y-auto', sidebarOpen ? 'translate-x-0' : 'translate-x-full']">
+      <div v-if="isSchemaLoaded && (getUniquePathVariables().length > 0 || getUniqueQueryParameters().length > 0 || getUniqueHeaderParameters().length > 0 || Object.keys(bodyVariableValues).length > 0)" :class="['w-80 bg-white dark:bg-gray-800 border-l border-gray-200 dark:border-gray-700 shadow-lg transition-all duration-300 ease-in-out overflow-y-auto', sidebarOpen ? 'translate-x-0' : 'translate-x-full']">
         <div class="p-4">
           <div class="mb-4"><h3 class="text-lg font-semibold text-gray-800 dark:text-gray-200">Global Variables</h3></div>
           <div class="border-t border-gray-200 dark:border-gray-700 pt-4">
-            <div class="mb-3"><h4 class="text-md font-medium text-gray-700 dark:text-gray-300">Path Variables</h4><p class="text-xs text-gray-500 mt-1">Add multiple values to test different combinations. Each value will be tested separately.</p></div>
+            <div class="mb-3"><h4 class="text-md font-medium text-red-600 dark:text-red-400">Path Variables</h4><p class="text-xs text-gray-500 mt-1">Add multiple values to test different combinations. Each value will be tested separately.</p></div>
             <div class="space-y-3">
               <div v-for="variable in getUniquePathVariables()" :key="variable" class="space-y-2">
                 <div class="flex items-center justify-between"><label class="block text-sm font-medium text-gray-700 dark:text-gray-300">{{ variable }}</label><Button label="Add Value" icon="pi pi-plus" @click="addPathVariableValue(variable)" size="small" severity="success" class="text-xs px-2 py-1" /></div>
@@ -3469,7 +4596,7 @@ const checkMigrationStatus = async () => {
             </div>
           </div>
           <div v-if="getUniqueQueryParameters().length > 0" class="border-t border-gray-200 dark:border-gray-700 pt-4 mt-4">
-            <div class="mb-3"><h4 class="text-md font-medium text-gray-700 dark:text-gray-300">Query Parameters</h4><p class="text-xs text-gray-500 mt-1">Add multiple values to test different combinations. Each value will be tested separately.</p></div>
+            <div class="mb-3"><h4 class="text-md font-medium text-red-600 dark:text-red-400">Query Parameters</h4><p class="text-xs text-gray-500 mt-1">Add multiple values to test different combinations. Each value will be tested separately.</p></div>
             <div class="space-y-3">
               <div v-for="param in getUniqueQueryParameters()" :key="param" class="space-y-2">
                 <div class="flex items-center justify-between"><label class="block text-sm font-medium text-gray-700 dark:text-gray-300">{{ param }}</label><Button label="Add Value" icon="pi pi-plus" @click="addQueryParameterValue(param)" size="small" severity="success" class="text-xs px-2 py-1" /></div>
@@ -3482,8 +4609,22 @@ const checkMigrationStatus = async () => {
               </div>
             </div>
           </div>
+          <div v-if="getUniqueHeaderParameters().length > 0" class="border-t border-gray-200 dark:border-gray-700 pt-4 mt-4">
+            <div class="mb-3"><h4 class="text-md font-medium text-red-600 dark:text-red-400">Header Parameters</h4><p class="text-xs text-gray-500 mt-1">Add multiple values to test different combinations. Each value will be tested separately.</p></div>
+            <div class="space-y-3">
+              <div v-for="param in getUniqueHeaderParameters()" :key="param" class="space-y-2">
+                <div class="flex items-center justify-between"><label class="block text-sm font-medium text-gray-700 dark:text-gray-300">{{ param }}</label><Button label="Add Value" icon="pi pi-plus" @click="addHeaderParameterValue(param)" size="small" severity="success" class="text-xs px-2 py-1" /></div>
+                <div class="space-y-2">
+                  <div v-for="(value, index) in getHeaderParameterValue(param)" :key="index" class="flex items-center gap-2">
+                    <InputText :modelValue="(headerParameterValues[param] && headerParameterValues[param][index]) || ''" @update:modelValue="(val) => { if (!headerParameterValues[param]) headerParameterValues[param] = []; headerParameterValues[param][index] = val; }" :placeholder="`Value ${index + 1} for ${param}`" class="flex-1" @paste="handleHeaderParameterPaste(param, $event)" />
+                    <Button v-if="getHeaderParameterValue(param).length > 1" label="Remove" icon="pi pi-trash" @click="removeHeaderParameterValue(param, index)" size="small" severity="danger" class="text-xs px-2 py-1" />
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
           <div v-if="Object.keys(bodyVariableValues).length > 0" class="border-t border-gray-200 dark:border-gray-700 pt-4 mt-4">
-            <div class="mb-3"><h4 class="text-md font-medium text-gray-700 dark:text-gray-300">Body Variables</h4><p class="text-xs text-gray-500 mt-1">Customize request body parameters for POST/PUT/PATCH requests.</p></div>
+            <div class="mb-3"><h4 class="text-md font-medium text-red-600 dark:text-red-400">Body Variables</h4><p class="text-xs text-gray-500 mt-1">Customize request body parameters for POST/PUT/PATCH requests.</p></div>
             <div class="space-y-3">
               <div v-for="[key, value] in sortedBodyVariables" :key="key" class="space-y-2">
                 <div class="flex items-center justify-between"><label class="block text-sm font-medium text-gray-700 dark:text-gray-300">{{ key }}</label><Button label="Add Value" icon="pi pi-plus" @click="addBodyVariableValue(key)" size="small" severity="success" class="text-xs px-2 py-1" /></div>
@@ -3523,6 +4664,19 @@ const checkMigrationStatus = async () => {
 /* Make column resizers visible */
 :deep(.p-datatable .p-datatable-thead > tr > th) {
   position: relative;
+}
+
+/* Fix accessibility warning: prevent focus on elements inside aria-hidden tabs */
+/* This prevents the browser warning about focusable elements in aria-hidden containers */
+/* PrimeVue sets aria-hidden on inactive tabs, but they may still contain focusable elements */
+:deep([aria-hidden="true"]) {
+  pointer-events: none !important;
+}
+
+/* Remove focus from any focused elements in hidden tabs */
+:deep([aria-hidden="true"] *:focus) {
+  outline: none !important;
+  pointer-events: none !important;
 }
 
 :deep(.p-datatable .p-datatable-thead > tr > th .p-column-resizer) {

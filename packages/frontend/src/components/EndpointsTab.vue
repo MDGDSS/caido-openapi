@@ -40,6 +40,17 @@
                 <div class="mt-4 flex gap-2">
                   <Button label="Test All Endpoints" @click="$emit('runAllTests')" :loading="isLoading" :disabled="isLoading" class="flex-1" />
                   <Button v-if="isLoading || runningTests.size > 0" label="Stop Tests" @click="$emit('stopAllTests')" severity="danger" size="small" />
+                  <Button 
+                    v-if="isRawMode"
+                    :label="isDetermining ? 'Stop Determine' : 'Determine'" 
+                    :icon="isDetermining ? 'pi pi-stop' : 'pi pi-search'"
+                    @click="isDetermining ? $emit('stopDetermine') : $emit('determineMethods')" 
+                    :disabled="!baseUrl?.trim() && !isDetermining"
+                    :loading="false"
+                    :severity="isDetermining ? 'danger' : 'info'"
+                    size="small"
+                    :title="isDetermining ? 'Stop determining methods' : 'Send OPTIONS requests to determine HTTP methods for endpoints without methods'"
+                  />
                 </div>
                 <div class="mt-4 p-3 bg-blue-50 dark:bg-blue-900/20 rounded-lg">
                   <p class="text-sm text-blue-800 dark:text-blue-200">
@@ -70,12 +81,17 @@
                 <div v-for="(testCase, index) in displayTestCases" :key="`${testCase.method || 'NO_METHOD'}-${testCase.path}`" :class="index % 2 === 0 ? 'bg-blue-200 dark:bg-blue-900/40' : 'bg-blue-300 dark:bg-blue-900/50'" :style="index % 2 === 0 ? 'background-color: #2f323a' : 'background-color: #353942'">
                   <div class="px-4 py-3 cursor-pointer" @click="$emit('toggleTestCaseExpansion', testCase)">
                     <div class="grid grid-cols-5 gap-4 items-center">
-                      <div><span v-if="testCase.method && testCase.method !== null" class="px-2 py-1 rounded text-xs font-medium" :class="{'bg-blue-100 text-blue-800': testCase.method === 'GET', 'bg-green-100 text-green-800': testCase.method === 'POST', 'bg-yellow-100 text-yellow-800': testCase.method === 'PUT', 'bg-red-100 text-red-800': testCase.method === 'DELETE'}">{{ testCase.method }}</span><span v-else class="px-2 py-1 rounded text-xs font-medium bg-gray-100 text-gray-800">-</span></div>
+                      <div>
+                        <span v-if="testCase.hasNoMethod" class="px-2 py-1 rounded text-xs font-medium bg-gray-100 text-gray-800 dark:bg-gray-700 dark:text-gray-300">NO METHOD</span>
+                        <span v-else-if="testCase.method && testCase.method !== null" class="px-2 py-1 rounded text-xs font-medium" :class="{'bg-blue-100 text-blue-800': testCase.method === 'GET', 'bg-green-100 text-green-800': testCase.method === 'POST', 'bg-yellow-100 text-yellow-800': testCase.method === 'PUT', 'bg-red-100 text-red-800': testCase.method === 'DELETE'}">{{ testCase.method }}</span>
+                        <span v-else class="px-2 py-1 rounded text-xs font-medium bg-gray-100 text-gray-800">-</span>
+                      </div>
                       <div class="col-span-2"><code class="text-sm bg-gray-100 dark:bg-gray-700 text-gray-900 dark:text-gray-100 px-2 py-1 rounded whitespace-normal break-words">{{ testCase.path }}</code></div>
                       <div><div v-if="getTestStatus(testCase)" class="flex items-center gap-2"><span :class="getStatusClass(getTestStatus(testCase)!.success)">{{ getStatusIcon(getTestStatus(testCase)!.success) }}</span><span :class="getStatusClass(getTestStatus(testCase)!.success)">{{ getTestStatus(testCase)!.status }}</span></div><div v-else class="text-gray-400 text-sm">Not tested</div></div>
                       <div class="flex items-center gap-2" @click.stop>
-                        <Button v-if="testCase.method && testCase.method !== null" label="Test" size="small" @click="$emit('runSingleTest', testCase)" :loading="isTestRunning(testCase)" :disabled="isTestRunning(testCase) || isLoading" />
-                        <Button label="All Methods" size="small" @click="$emit('runAllMethods', testCase)" :loading="isTestRunning(testCase)" :disabled="isTestRunning(testCase) || isLoading" severity="info" />
+                        <Button v-if="!testCase.hasNoMethod && testCase.method && testCase.method !== null" label="Test" size="small" @click="$emit('runSingleTest', testCase)" :loading="isTestRunning(testCase)" :disabled="isTestRunning(testCase) || isLoading" />
+                        <Button v-if="testCase.hasNoMethod" label="All Methods" size="small" @click="$emit('runAllMethods', testCase)" :loading="isTestRunning(testCase)" :disabled="isTestRunning(testCase) || isLoading" severity="info" />
+                        <Button v-else-if="!testCase.hasNoMethod" label="All Methods" size="small" @click="$emit('runAllMethods', testCase)" :loading="isTestRunning(testCase)" :disabled="isTestRunning(testCase) || isLoading" severity="info" />
                         <button 
                           @click="$emit('toggleTestCaseExpansion', testCase)" 
                           :title="isTestCaseExpanded(testCase) ? 'Collapse' : 'Expand'"
@@ -107,6 +123,15 @@
                           </div>
                         </div>
                       </div>
+                      <div v-if="testCase.parameters && testCase.parameters.filter((p: any) => p.in === 'header').length > 0">
+                        <h4 class="text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">Header Parameters</h4>
+                        <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+                          <div v-for="param in testCase.parameters.filter((p: any) => p.in === 'header')" :key="param.name" class="flex items-center gap-2">
+                            <label class="text-sm text-gray-600 dark:text-gray-400 min-w-[100px]">{{ param.name }}:</label>
+                            <InputText :modelValue="testCaseHeaderParameterValues[getTestCaseId(testCase)]?.[param.name] || ''" @update:modelValue="updateTestCaseHeaderParameter(testCase, param.name, $event)" :placeholder="`Value for ${param.name}`" class="flex-1" size="small" />
+                          </div>
+                        </div>
+                      </div>
                       <div v-if="testCase.bodyVariables && Object.keys(testCase.bodyVariables).length > 0">
                         <h4 class="text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">Body Variables</h4>
                         <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
@@ -116,7 +141,7 @@
                           </div>
                         </div>
                       </div>
-                      <div v-if="(!testCase.pathVariables || testCase.pathVariables.length === 0) && (!testCase.parameters || testCase.parameters.filter((p: any) => p.in === 'query').length === 0) && (!testCase.bodyVariables || Object.keys(testCase.bodyVariables).length === 0)">
+                      <div v-if="(!testCase.pathVariables || testCase.pathVariables.length === 0) && (!testCase.parameters || (testCase.parameters.filter((p: any) => p.in === 'query').length === 0 && testCase.parameters.filter((p: any) => p.in === 'header').length === 0)) && (!testCase.bodyVariables || Object.keys(testCase.bodyVariables).length === 0)">
                         <p class="text-sm text-gray-500 dark:text-gray-400">No variables to configure for this endpoint.</p>
                       </div>
                     </div>
@@ -149,6 +174,7 @@ defineProps<{
   displayTestCases: any[];
   testCasePathVariableValues: Record<string, Record<string, string>>;
   testCaseQueryParameterValues: Record<string, Record<string, string>>;
+  testCaseHeaderParameterValues: Record<string, Record<string, string>>;
   testCaseBodyVariableValues: Record<string, Record<string, any>>;
   isTestCaseExpanded: (testCase: any) => boolean;
   isTestRunning: (testCase: any) => boolean;
@@ -157,6 +183,8 @@ defineProps<{
   getStatusIcon: (success: boolean) => string;
   getTestCaseId: (testCase: any) => string;
   testErrorMessage: string | null;
+  isRawMode?: boolean;
+  isDetermining?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -172,8 +200,11 @@ const emit = defineEmits<{
   'clearEndpointSearch': [];
   'updateTestCasePathVariable': [testCase: any, variable: string, value: string];
   'updateTestCaseQueryParameter': [testCase: any, paramName: string, value: string];
+  'updateTestCaseHeaderParameter': [testCase: any, paramName: string, value: string];
   'updateTestCaseBodyVariable': [testCase: any, key: string, value: any];
   'clearTestError': [];
+  'determineMethods': [];
+  'stopDetermine': [];
 }>();
 
 const updateTestCasePathVariable = (testCase: any, variable: string, value: string) => {
@@ -182,6 +213,10 @@ const updateTestCasePathVariable = (testCase: any, variable: string, value: stri
 
 const updateTestCaseQueryParameter = (testCase: any, paramName: string, value: string) => {
   emit('updateTestCaseQueryParameter', testCase, paramName, value);
+};
+
+const updateTestCaseHeaderParameter = (testCase: any, paramName: string, value: string) => {
+  emit('updateTestCaseHeaderParameter', testCase, paramName, value);
 };
 
 const updateTestCaseBodyVariable = (testCase: any, key: string, value: any) => {

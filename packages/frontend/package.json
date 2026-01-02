@@ -7,6 +7,7 @@
   },
   "dependencies": {
     "@caido/primevue": "0.1.2",
+    "js-yaml": "^4.1.1",
     "primevue": "4.1.0",
     "vue": "3.4.37"
   },
@@ -14,6 +15,7 @@
     "@caido/sdk-backend": "^0.52.0",
     "@caido/sdk-frontend": "^0.52.0",
     "@codemirror/view": "6.28.1",
+    "@types/js-yaml": "^4.0.9",
     "backend": "workspace:*",
     "vue-tsc": "2.0.29"
   }

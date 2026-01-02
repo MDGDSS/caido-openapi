@@ -11,8 +11,8 @@ const id = "openapi-tester";
 export default defineConfig({
   id,
   name: "OpenAPI",
-  description: "OpenAPI schema testing and validation",
-  version: "1.0.8",
+  description: "Accelerate endpoint testing by providing schemas or paths. ",
+  version: "1.0.9",
   author: {
     name: "xvffdos",
     email: "dev@xvffdos.com",
@@ -47,7 +47,13 @@ export default defineConfig({
               "@lezer/common", 
               "@lezer/highlight", 
               "@lezer/lr"
-            ]
+            ],
+            output: {
+              format: 'es'
+            }
+          },
+          commonjsOptions: {
+            include: [/primevue/, /node_modules/]
           }
         },
         resolve: {
@@ -57,6 +63,8 @@ export default defineConfig({
               replacement: path.resolve(__dirname, "packages/frontend/src"),
             },
           ],
+          dedupe: ['vue', 'primevue'],
+          conditions: ['import', 'module', 'browser', 'default'],
         },
         css: {
           postcss: {
