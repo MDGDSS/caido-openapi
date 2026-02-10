@@ -38,6 +38,9 @@ export interface FrontendSDK {
     getAllSessionProjectKeys: () => Promise<{ kind: "Error"; error: string } | { kind: "Ok"; value: string[] }>;
     isMigrationCompleted: () => Promise<{ kind: "Error"; error: string } | { kind: "Ok"; value: boolean }>;
     determineMethodsForEndpoints: (endpoints: string[], baseUrl: string, options?: { timeout?: number; headers?: Record<string, string>; stopFlag?: { stop: boolean } }) => Promise<Array<{ path: string; methods: string[] }>>;
+    processUploadedFile: (fileContent: string) => Promise<{ kind: "Error"; error: string } | { kind: "Ok"; value: { schemaText: string; testCases: any[]; parsedSchema: any; validation: { valid: boolean; errors: string[] } } }>;
+    saveFileUploadChunk: (chunkIndex: number, chunk: string, metadata?: { chunks: number; totalLength: number } | undefined) => Promise<{ kind: "Error"; error: string } | { kind: "Ok"; value: undefined }>;
+    processUploadedFileChunks: () => Promise<{ kind: "Error"; error: string } | { kind: "Ok"; value: { schemaText: string; testCases: any[]; parsedSchema: any; validation: { valid: boolean; errors: string[] } } }>;
     // Session management
     createSession: (name: string, schema: any, configuration: any) => Promise<any>;
     getSession: (id: string) => Promise<any>;

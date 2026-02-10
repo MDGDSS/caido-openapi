@@ -1,5 +1,6 @@
 import type { DefineAPI, SDK } from "caido:plugin";
 import { RequestSpec } from "caido:utils";
+import * as yaml from 'js-yaml';
 
 // Add global type declarations for setTimeout
 declare global {
@@ -1089,6 +1090,254 @@ const getSchemaInfo = (sdk: SDK, schemaText: string): { title: string; version: 
   }
 };
 
+// Save file chunk for upload
+const saveFileUploadChunk = async (sdk: SDK, chunkIndex: number, chunk: string, metadata?: { chunks: number; totalLength: number }): Promise<Result<void>> => {
+  try {
+    if (typeof chunkIndex !== 'number' || chunkIndex < 0) {
+      return {
+        kind: "Error",
+        error: `Invalid chunkIndex: ${chunkIndex}`,
+      };
+    }
+    if (!chunk || typeof chunk !== 'string') {
+      return {
+        kind: "Error",
+        error: `Invalid chunk: expected string, got ${typeof chunk}`,
+      };
+    }
+    
+    const db = await sdk.meta.db();
+    const baseKey = `openapi-fileUpload`;
+    
+    // Save metadata if provided (should be sent with first chunk)
+    if (metadata && chunkIndex === 0 && typeof metadata === 'object') {
+      const metadataStmt = await db.prepare(`
+        INSERT OR REPLACE INTO config (key, value) 
+        VALUES (?, ?)
+      `);
+      await metadataStmt.run(`${baseKey}-metadata`, JSON.stringify(metadata));
+    }
+    
+    // Save the chunk
+    const chunkKey = `${baseKey}-chunk-${chunkIndex}`;
+    const chunkStmt = await db.prepare(`
+      INSERT OR REPLACE INTO config (key, value) 
+      VALUES (?, ?)
+    `);
+    await chunkStmt.run(chunkKey, chunk);
+    
+    return { kind: "Ok", value: undefined };
+  } catch (error) {
+    return {
+      kind: "Error",
+      error: `Failed to save file chunk ${chunkIndex}: ${error instanceof Error ? error.message : String(error)}`,
+    };
+  }
+};
+
+// Process reassembled uploaded file - parse YAML/JSON, validate, and generate test cases in backend
+const processUploadedFileChunks = async (sdk: SDK): Promise<Result<{ schemaText: string; testCases: TestCase[]; parsedSchema: OpenAPISchema; validation: { valid: boolean; errors: string[] } }>> => {
+  try {
+    const db = await sdk.meta.db();
+    const baseKey = `openapi-fileUpload`;
+    
+    // Load metadata
+    const metadataStmt = await db.prepare(`SELECT value FROM config WHERE key = ?`);
+    const metadataResult = await metadataStmt.get<{ value: string }>(`${baseKey}-metadata`);
+    
+    if (!metadataResult || !metadataResult.value) {
+      return {
+        kind: "Error",
+        error: "No file upload metadata found. Please upload the file again."
+      };
+    }
+    
+    const metadata = JSON.parse(metadataResult.value);
+    const numChunks = metadata.chunks;
+    const chunks: string[] = [];
+    
+    // Reassemble chunks
+    for (let i = 0; i < numChunks; i++) {
+      const chunkKey = `${baseKey}-chunk-${i}`;
+      const chunkStmt = await db.prepare(`SELECT value FROM config WHERE key = ?`);
+      const chunkResult = await chunkStmt.get<{ value: string }>(chunkKey);
+      
+      if (chunkResult && chunkResult.value) {
+        chunks.push(chunkResult.value);
+      } else {
+        return {
+          kind: "Error",
+          error: `Missing chunk ${i} for uploaded file`,
+        };
+      }
+    }
+    
+    const fileContent = chunks.join('');
+    
+    // Clean up chunks after processing
+    try {
+      for (let i = 0; i < numChunks; i++) {
+        const chunkKey = `${baseKey}-chunk-${i}`;
+        const deleteStmt = await db.prepare(`DELETE FROM config WHERE key = ?`);
+        await deleteStmt.run(chunkKey);
+      }
+      const deleteMetadataStmt = await db.prepare(`DELETE FROM config WHERE key = ?`);
+      await deleteMetadataStmt.run(`${baseKey}-metadata`);
+    } catch (cleanupError) {
+      // Log but don't fail if cleanup fails
+      console.warn('Failed to cleanup file upload chunks:', cleanupError);
+    }
+    
+    // Process the file content
+    const trimmed = fileContent.trim();
+    
+    if (!trimmed) {
+      return {
+        kind: "Error",
+        error: "File is empty"
+      };
+    }
+    
+    let parsedSchema: OpenAPISchema;
+    let schemaText: string;
+    let wasYaml = false;
+    
+    // Try to parse as JSON first
+    try {
+      parsedSchema = JSON.parse(trimmed);
+      schemaText = JSON.stringify(parsedSchema); // Minify JSON
+    } catch {
+      // Not valid JSON, try YAML
+      try {
+        const yamlDoc = yaml.load(trimmed, { 
+          schema: yaml.DEFAULT_SCHEMA,
+          json: true // Use JSON schema for better compatibility
+        });
+        
+        if (yamlDoc && typeof yamlDoc === 'object') {
+          parsedSchema = yamlDoc as OpenAPISchema;
+          schemaText = JSON.stringify(yamlDoc); // Convert to JSON string
+          wasYaml = true;
+        } else {
+          return {
+            kind: "Error",
+            error: "Invalid YAML: parsed result is not an object"
+          };
+        }
+      } catch (yamlError) {
+        return {
+          kind: "Error",
+          error: `Failed to parse file as JSON or YAML: ${yamlError instanceof Error ? yamlError.message : String(yamlError)}`
+        };
+      }
+    }
+    
+    // Validate the schema
+    const validation = validateSchema(sdk, schemaText);
+    
+    if (!validation.valid) {
+      return {
+        kind: "Error",
+        error: `Schema validation failed: ${validation.errors.join(', ')}`
+      };
+    }
+    
+    // Generate test cases
+    const testCases = generateTestCases(sdk, parsedSchema);
+    
+    return {
+      kind: "Ok",
+      value: {
+        schemaText,
+        testCases,
+        parsedSchema,
+        validation
+      }
+    };
+  } catch (error) {
+    return {
+      kind: "Error",
+      error: `Failed to process file: ${error instanceof Error ? error.message : String(error)}`
+    };
+  }
+};
+
+// Process uploaded file - parse YAML/JSON, validate, and generate test cases in backend
+const processUploadedFile = async (sdk: SDK, fileContent: string): Promise<Result<{ schemaText: string; testCases: TestCase[]; parsedSchema: OpenAPISchema; validation: { valid: boolean; errors: string[] } }>> => {
+  try {
+    const trimmed = fileContent.trim();
+    
+    if (!trimmed) {
+      return {
+        kind: "Error",
+        error: "File is empty"
+      };
+    }
+    
+    let parsedSchema: OpenAPISchema;
+    let schemaText: string;
+    let wasYaml = false;
+    
+    // Try to parse as JSON first
+    try {
+      parsedSchema = JSON.parse(trimmed);
+      schemaText = JSON.stringify(parsedSchema); // Minify JSON
+    } catch {
+      // Not valid JSON, try YAML
+      try {
+        const yamlDoc = yaml.load(trimmed, { 
+          schema: yaml.DEFAULT_SCHEMA,
+          json: true // Use JSON schema for better compatibility
+        });
+        
+        if (yamlDoc && typeof yamlDoc === 'object') {
+          parsedSchema = yamlDoc as OpenAPISchema;
+          schemaText = JSON.stringify(yamlDoc); // Convert to JSON string
+          wasYaml = true;
+        } else {
+          return {
+            kind: "Error",
+            error: "Invalid YAML: parsed result is not an object"
+          };
+        }
+      } catch (yamlError) {
+        return {
+          kind: "Error",
+          error: `Failed to parse file as JSON or YAML: ${yamlError instanceof Error ? yamlError.message : String(yamlError)}`
+        };
+      }
+    }
+    
+    // Validate the schema
+    const validation = validateSchema(sdk, schemaText);
+    
+    if (!validation.valid) {
+      return {
+        kind: "Error",
+        error: `Schema validation failed: ${validation.errors.join(', ')}`
+      };
+    }
+    
+    // Generate test cases
+    const testCases = generateTestCases(sdk, parsedSchema);
+    
+    return {
+      kind: "Ok",
+      value: {
+        schemaText,
+        testCases,
+        parsedSchema,
+        validation
+      }
+    };
+  } catch (error) {
+    return {
+      kind: "Error",
+      error: `Failed to process file: ${error instanceof Error ? error.message : String(error)}`
+    };
+  }
+};
+
 // Simple test function to demonstrate HTTP requests
 const testHttpRequest = async (sdk: SDK, url: string): Promise<{ success: boolean; status: number; response: string }> => {
   try {
@@ -1978,6 +2227,9 @@ export type API = DefineAPI<{
   getAllSessionProjectKeys: typeof getAllSessionProjectKeys;
   isMigrationCompleted: typeof isMigrationCompleted;
   determineMethodsForEndpoints: typeof determineMethodsForEndpoints;
+  processUploadedFile: typeof processUploadedFile;
+  saveFileUploadChunk: typeof saveFileUploadChunk;
+  processUploadedFileChunks: typeof processUploadedFileChunks;
 }>;
 
 export function init(sdk: SDK<API>) {
@@ -2022,6 +2274,9 @@ export function init(sdk: SDK<API>) {
   sdk.api.register("getAllSessionProjectKeys", getAllSessionProjectKeys);
   sdk.api.register("isMigrationCompleted", isMigrationCompleted);
   sdk.api.register("determineMethodsForEndpoints", determineMethodsForEndpoints);
+  sdk.api.register("processUploadedFile", processUploadedFile);
+  sdk.api.register("saveFileUploadChunk", saveFileUploadChunk);
+  sdk.api.register("processUploadedFileChunks", processUploadedFileChunks);
 }
 
 // Set environment variable using backend SDK

@@ -13,15 +13,32 @@
       <div>
         <div class="flex items-center justify-between mb-2">
           <label class="block text-sm font-medium">Input (JSON, YAML, or Raw Endpoints)</label>
-          <Button 
-            v-if="schemaTextExcluded" 
-            label="Download Schema" 
-            icon="pi pi-download" 
-            @click="$emit('downloadSchema')" 
-            size="small"
-            severity="warning"
-            :title="'Schema was excluded from session data due to size. Click to download.'"
-          />
+          <div class="flex gap-2">
+            <input 
+              ref="fileInputRef"
+              type="file" 
+              accept=".json,.yaml,.yml,.txt" 
+              @change="handleFileUpload"
+              class="hidden"
+            />
+            <Button 
+              label="Upload File" 
+              icon="pi pi-upload" 
+              @click="triggerFileUpload"
+              size="small"
+              severity="secondary"
+              :title="'Upload OpenAPI schema file (JSON/YAML) for faster processing'"
+            />
+            <Button 
+              v-if="schemaTextExcluded" 
+              label="Download Schema" 
+              icon="pi pi-download" 
+              @click="$emit('downloadSchema')" 
+              size="small"
+              severity="warning"
+              :title="'Schema was excluded from session data due to size. Click to download.'"
+            />
+          </div>
         </div>
         <div v-if="schemaTextExcluded" class="mb-2">
           <Message severity="warn" :closable="false">
@@ -70,6 +87,9 @@ import InputText from "primevue/inputtext";
 import Textarea from "primevue/textarea";
 import Button from "primevue/button";
 import Message from "primevue/message";
+import { useSDK } from "@/plugins/sdk";
+
+const sdk = useSDK();
 
 const props = defineProps<{
   baseUrl: string;
@@ -87,7 +107,11 @@ const emit = defineEmits<{
   'loadSchema': [];
   'loadRawEndpoints': [];
   'downloadSchema': [];
+  'fileUploaded': [schemaText: string, testCases: any[], parsedSchema: any];
 }>();
+
+const fileInputRef = ref<HTMLInputElement | null>(null);
+const isUploading = ref(false);
 
 // Unified input value
 const unifiedInput = ref('');
@@ -223,6 +247,95 @@ const handleLoad = () => {
     emit('loadSchema');
   } else if (detectedType.value === 'Raw Endpoints') {
     emit('loadRawEndpoints');
+  }
+};
+
+// Trigger file input click
+const triggerFileUpload = () => {
+  fileInputRef.value?.click();
+};
+
+// Handle file upload
+const handleFileUpload = async (event: Event) => {
+  const target = event.target as HTMLInputElement;
+  const file = target.files?.[0];
+  
+  if (!file) return;
+  
+  isUploading.value = true;
+  
+  try {
+    // Read file as text
+    const fileContent = await file.text();
+    const fileSize = fileContent.length;
+    
+    // Chunk size: 1000KB per chunk (to stay well under RPC limits)
+    const CHUNK_SIZE = 1000 * 1024; // 1000KB
+    
+    if (fileSize <= CHUNK_SIZE) {
+      // Small enough to send in one call
+      const result = await sdk.backend.processUploadedFile(fileContent);
+      
+      if (result.kind === 'Error') {
+        throw new Error(result.error);
+      }
+      
+      // Update the unified input with the processed schema text
+      unifiedInput.value = result.value.schemaText;
+      detectedType.value = detectInputType(result.value.schemaText);
+      
+      // Emit the processed data to parent
+      emit('update:schemaText', result.value.schemaText);
+      emit('fileUploaded', result.value.schemaText, result.value.testCases, result.value.parsedSchema);
+    } else {
+      // Too large - need to chunk
+      const numChunks = Math.ceil(fileSize / CHUNK_SIZE);
+      const metadata = { chunks: numChunks, totalLength: fileSize };
+      
+      // Send chunks sequentially
+      for (let i = 0; i < numChunks; i++) {
+        const start = i * CHUNK_SIZE;
+        const end = Math.min(start + CHUNK_SIZE, fileSize);
+        const chunk = fileContent.substring(start, end);
+        
+        // Only pass metadata with the first chunk
+        let result;
+        if (i === 0) {
+          result = await sdk.backend.saveFileUploadChunk(i, chunk, metadata);
+        } else {
+          result = await sdk.backend.saveFileUploadChunk(i, chunk);
+        }
+        
+        if (result.kind === 'Error') {
+          throw new Error(`Failed to upload chunk ${i + 1}/${numChunks}: ${result.error}`);
+        }
+      }
+      
+      // Process the reassembled file
+      const processResult = await sdk.backend.processUploadedFileChunks();
+      
+      if (processResult.kind === 'Error') {
+        throw new Error(processResult.error);
+      }
+      
+      // Update the unified input with the processed schema text
+      unifiedInput.value = processResult.value.schemaText;
+      detectedType.value = detectInputType(processResult.value.schemaText);
+      
+      // Emit the processed data to parent
+      emit('update:schemaText', processResult.value.schemaText);
+      emit('fileUploaded', processResult.value.schemaText, processResult.value.testCases, processResult.value.parsedSchema);
+    }
+    
+  } catch (error) {
+    console.error('File upload error:', error);
+    alert(`Failed to process file: ${error instanceof Error ? error.message : String(error)}`);
+  } finally {
+    isUploading.value = false;
+    // Reset file input
+    if (target) {
+      target.value = '';
+    }
   }
 };
 

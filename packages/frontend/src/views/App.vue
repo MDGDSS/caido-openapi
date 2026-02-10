@@ -95,6 +95,7 @@ interface OpenAPISession {
   useParameterFromDefinition: boolean;
   testResults: any[];
   testCases: any[];
+  parsedSchema?: any; // Saved for Definition tab (chunked separately)
   isSchemaLoaded: boolean;
   isRawMode?: boolean;
   rawEndpoints?: string;
@@ -463,6 +464,7 @@ const saveCurrentSession = async () => {
     currentSession.useParameterFromDefinition = useParameterFromDefinition.value;
     currentSession.testResults = [...testResults.value];
     currentSession.testCases = [...testCases.value];
+    currentSession.parsedSchema = parsedSchema.value ? JSON.parse(JSON.stringify(parsedSchema.value)) : null; // Deep copy for Definition tab
     currentSession.isSchemaLoaded = isSchemaLoaded.value;
     currentSession.isRawMode = isRawMode.value;
     currentSession.rawEndpoints = rawEndpoints.value;
@@ -555,6 +557,33 @@ const loadSession = async (sessionId: string) => {
       useParameterFromDefinition.value = session.useParameterFromDefinition !== undefined ? session.useParameterFromDefinition : true;
       testResults.value = Array.isArray(session.testResults) ? [...session.testResults] : [];
       testCases.value = Array.isArray(session.testCases) ? [...session.testCases] : [];
+      
+      // Restore parsedSchema - first try from session data, then from chunked storage
+      if (session.parsedSchema) {
+        parsedSchema.value = JSON.parse(JSON.stringify(session.parsedSchema)); // Deep copy
+      } else {
+        // Try to load from chunked storage
+        try {
+          let projectKey: string;
+          try {
+            const openapiValue = await sdk.env.getVar('openapi');
+            projectKey = openapiValue || currentProjectId.value || 'default';
+          } catch {
+            projectKey = currentProjectId.value || 'default';
+          }
+          
+          const result = await sdk.backend.loadSchemaTextFromDb(projectKey, `${session.id}-parsedSchema`);
+          if (result.kind === "Ok" && result.value) {
+            parsedSchema.value = JSON.parse(result.value);
+          } else {
+            parsedSchema.value = null;
+          }
+        } catch (error) {
+          console.error('Failed to load parsedSchema from storage:', error);
+          parsedSchema.value = null;
+        }
+      }
+      
       isSchemaLoaded.value = session.isSchemaLoaded || false;
       isRawMode.value = session.isRawMode || false;
       rawEndpoints.value = session.rawEndpoints || '';
@@ -749,7 +778,47 @@ const saveSingleSessionToStorage = async (session: OpenAPISession) => {
     
     //console.log(`[Save Single Session] Saving session ${session.id} only`);
     
-    // Step 1: Save schemaText separately for this session only
+    // Step 1: Save parsedSchema separately for this session only (for Definition tab)
+    // Only save if parsedSchema exists and is not null
+    if (session.parsedSchema && session.id) {
+      try {
+        const parsedSchemaJson = JSON.stringify(session.parsedSchema);
+        const parsedSchemaSize = parsedSchemaJson.length;
+        const CHUNK_SIZE = 1000 * 1024; // 1000KB
+        
+        if (parsedSchemaSize <= CHUNK_SIZE) {
+          const result = await sdk.backend.saveSchemaTextToDb(projectKey, `${session.id}-parsedSchema`, parsedSchemaJson);
+          if (result.kind === "Error") {
+            console.error(`[Save Single Session] Failed to save parsedSchema for session ${session.id}:`, result.error);
+          }
+        } else {
+          const numChunks = Math.ceil(parsedSchemaSize / CHUNK_SIZE);
+          const metadata = { chunks: numChunks, totalLength: parsedSchemaSize };
+          
+          for (let i = 0; i < numChunks; i++) {
+            const start = i * CHUNK_SIZE;
+            const end = Math.min(start + CHUNK_SIZE, parsedSchemaSize);
+            const chunk = parsedSchemaJson.substring(start, end);
+            
+            let result;
+            if (i === 0) {
+              result = await sdk.backend.saveSchemaTextChunk(projectKey, `${session.id}-parsedSchema`, i, chunk, metadata);
+            } else {
+              result = await sdk.backend.saveSchemaTextChunk(projectKey, `${session.id}-parsedSchema`, i, chunk);
+            }
+            
+            if (result.kind === "Error") {
+              console.error(`[Save Single Session] Failed to save parsedSchema chunk ${i}:`, result.error);
+              break;
+            }
+          }
+        }
+      } catch (error) {
+        console.error(`[Save Single Session] Exception saving parsedSchema for session ${session.id}:`, error);
+      }
+    }
+    
+    // Step 1.5: Save schemaText separately for this session only
     // Only save if schemaText exists and is not empty
     if (session.schemaText && session.schemaText.trim().length > 0 && session.id) {
       const schemaTextSize = session.schemaText.length;
@@ -874,10 +943,10 @@ const saveSingleSessionToStorage = async (session: OpenAPISession) => {
       sessionsData = allSessions.map(s => {
         const serializableSession: any = {};
         
-        // Copy all properties except schemaText
+        // Copy all properties except schemaText and parsedSchema
         for (const [key, value] of Object.entries(s)) {
-          // Skip functions, undefined values, and schemaText
-          if (typeof value === 'function' || value === undefined || key === 'schemaText') {
+          // Skip functions, undefined values, schemaText, and parsedSchema
+          if (typeof value === 'function' || value === undefined || key === 'schemaText' || key === 'parsedSchema') {
             continue;
           }
           
@@ -947,9 +1016,55 @@ const saveSessionsToStorage = async () => {
       }
     }
     
-    //console.log('[Save Sessions] Using batching: saving schemaText separately, then session data');
+    //console.log('[Save Sessions] Using batching: saving parsedSchema and schemaText separately, then session data');
     
-    // Step 1: Save schemaText separately for each session (batching to avoid payload size issues)
+    // Step 1: Save parsedSchema separately for each session (batching to avoid payload size issues)
+    const parsedSchemaSavePromises: Promise<void>[] = [];
+    for (const session of sessions.value) {
+      if (session.parsedSchema && session.id) {
+        parsedSchemaSavePromises.push(
+          (async () => {
+            try {
+              const parsedSchemaJson = JSON.stringify(session.parsedSchema);
+              const parsedSchemaSize = parsedSchemaJson.length;
+              const CHUNK_SIZE = 1000 * 1024; // 1000KB
+              
+              if (parsedSchemaSize <= CHUNK_SIZE) {
+                const result = await sdk.backend.saveSchemaTextToDb(projectKey, `${session.id}-parsedSchema`, parsedSchemaJson);
+                if (result.kind === "Error") {
+                  console.error(`[Save Sessions] Failed to save parsedSchema for session ${session.id}:`, result.error);
+                }
+              } else {
+                const numChunks = Math.ceil(parsedSchemaSize / CHUNK_SIZE);
+                const metadata = { chunks: numChunks, totalLength: parsedSchemaSize };
+                
+                for (let i = 0; i < numChunks; i++) {
+                  const start = i * CHUNK_SIZE;
+                  const end = Math.min(start + CHUNK_SIZE, parsedSchemaSize);
+                  const chunk = parsedSchemaJson.substring(start, end);
+                  
+                  let result;
+                  if (i === 0) {
+                    result = await sdk.backend.saveSchemaTextChunk(projectKey, `${session.id}-parsedSchema`, i, chunk, metadata);
+                  } else {
+                    result = await sdk.backend.saveSchemaTextChunk(projectKey, `${session.id}-parsedSchema`, i, chunk);
+                  }
+                  
+                  if (result.kind === "Error") {
+                    console.error(`[Save Sessions] Failed to save parsedSchema chunk ${i}:`, result.error);
+                    break;
+                  }
+                }
+              }
+            } catch (error) {
+              console.error(`[Save Sessions] Exception saving parsedSchema for session ${session.id}:`, error);
+            }
+          })()
+        );
+      }
+    }
+    
+    // Step 1.5: Save schemaText separately for each session (batching to avoid payload size issues)
     const schemaTextSavePromises: Promise<void>[] = [];
     for (const session of sessions.value) {
       if (session.schemaText && session.id) {
@@ -1030,9 +1145,9 @@ const saveSessionsToStorage = async () => {
       }
     }
     
-    // Wait for all schemaText saves to complete (don't fail if some fail)
-    await Promise.allSettled(schemaTextSavePromises);
-    //console.log(`[Save Sessions] All schemaText saves completed`);
+    // Wait for all parsedSchema and schemaText saves to complete (don't fail if some fail)
+    await Promise.allSettled([...parsedSchemaSavePromises, ...schemaTextSavePromises]);
+    //console.log(`[Save Sessions] All parsedSchema and schemaText saves completed`);
     
     // Step 2: Save sessions, but exclude schemaText if payload is too large
     // First, try with schemaText included
@@ -1075,10 +1190,10 @@ const saveSessionsToStorage = async () => {
       sessionsData = sessions.value.map(session => {
         const serializableSession: any = {};
         
-        // Copy all properties except schemaText
+        // Copy all properties except schemaText and parsedSchema
         for (const [key, value] of Object.entries(session)) {
-          // Skip functions, undefined values, and schemaText
-          if (typeof value === 'function' || value === undefined || key === 'schemaText') {
+          // Skip functions, undefined values, schemaText, and parsedSchema
+          if (typeof value === 'function' || value === undefined || key === 'schemaText' || key === 'parsedSchema') {
             continue;
           }
           
@@ -1772,6 +1887,141 @@ const generateTestCasesFromRaw = (rawText: string): any[] => {
   }
   
   return testCases;
+};
+
+// Handle file upload - data is already processed in backend
+const handleFileUploaded = async (uploadedSchemaText: string, uploadedTestCases: any[], uploadedParsedSchema: any) => {
+  try {
+    isRawMode.value = false;
+    
+    // Update schema text
+    schemaText.value = uploadedSchemaText;
+    
+    // Update validation result (from backend)
+    validationResult.value = { valid: true, errors: [] };
+    
+    // Store parsed schema for definition viewer
+    parsedSchema.value = uploadedParsedSchema;
+    
+    // Use test cases from backend
+    testCases.value = uploadedTestCases;
+    isSchemaLoaded.value = true;
+    activeTab.value = 1; // Switch to test cases tab
+    
+    // Auto-save session after loading schema
+    await saveCurrentSession();
+    
+    // Initialize path variables
+    const allPathVariables = new Set<string>();
+    uploadedTestCases.forEach(testCase => {
+      if (testCase.pathVariables && Array.isArray(testCase.pathVariables)) {
+        testCase.pathVariables.forEach((variable: string) => {
+          if (variable && typeof variable === 'string') {
+            allPathVariables.add(variable);
+          }
+        });
+      }
+    });
+    
+    // Initialize path variable values
+    pathVariableValues.value = {};
+    allPathVariables.forEach(variable => {
+      pathVariableValues.value[variable] = [''];
+    });
+    
+    // Initialize query parameter values
+    const allQueryParameters = new Set<string>();
+    uploadedTestCases.forEach(testCase => {
+      if (testCase.parameters && Array.isArray(testCase.parameters)) {
+        testCase.parameters.forEach((param: any) => {
+          if (param.in === 'query' && param.name && typeof param.name === 'string') {
+            allQueryParameters.add(param.name);
+          }
+        });
+      }
+    });
+    
+    queryParameterValues.value = {};
+    allQueryParameters.forEach(param => {
+      queryParameterValues.value[param] = [''];
+    });
+    
+    // Initialize header parameter values
+    const allHeaderParameters = new Set<string>();
+    uploadedTestCases.forEach(testCase => {
+      if (testCase.parameters && Array.isArray(testCase.parameters)) {
+        testCase.parameters.forEach((param: any) => {
+          if (param.in === 'header' && param.name && typeof param.name === 'string') {
+            allHeaderParameters.add(param.name);
+          }
+        });
+      }
+    });
+    
+    headerParameterValues.value = {};
+    allHeaderParameters.forEach(param => {
+      headerParameterValues.value[param] = [''];
+    });
+    
+    // Initialize body variable values
+    bodyVariableValues.value = {};
+    uploadedTestCases.forEach(testCase => {
+      if (testCase.bodyVariables) {
+        Object.entries(testCase.bodyVariables).forEach(([key, value]) => {
+          bodyVariableValues.value[key] = [String(value)];
+        });
+      }
+    });
+    
+    // Initialize test case specific variable values
+    testCasePathVariableValues.value = {};
+    testCaseQueryParameterValues.value = {};
+    testCaseHeaderParameterValues.value = {};
+    testCaseBodyVariableValues.value = {};
+    
+    uploadedTestCases.forEach(testCase => {
+      const testCaseId = getTestCaseId(testCase);
+      
+      // Initialize path variables
+      if (testCase.pathVariables) {
+        testCasePathVariableValues.value[testCaseId] = {};
+        testCase.pathVariables.forEach((variable: string) => {
+          testCasePathVariableValues.value[testCaseId][variable] = '';
+        });
+      }
+      
+      // Initialize query parameters
+      if (testCase.parameters) {
+        testCaseQueryParameterValues.value[testCaseId] = {};
+        testCase.parameters.forEach((param: any) => {
+          if (param.in === 'query' && param.name) {
+            testCaseQueryParameterValues.value[testCaseId][param.name] = '';
+          }
+        });
+      }
+      
+      // Initialize header parameters
+      if (testCase.parameters) {
+        testCaseHeaderParameterValues.value[testCaseId] = {};
+        testCase.parameters.forEach((param: any) => {
+          if (param.in === 'header' && param.name) {
+            testCaseHeaderParameterValues.value[testCaseId][param.name] = '';
+          }
+        });
+      }
+      
+      // Initialize body variables
+      if (testCase.bodyVariables) {
+        testCaseBodyVariableValues.value[testCaseId] = {};
+        Object.entries(testCase.bodyVariables).forEach(([key, value]) => {
+          testCaseBodyVariableValues.value[testCaseId][key] = '';
+        });
+      }
+    });
+  } catch (error) {
+    console.error("Failed to handle uploaded file:", error);
+    validationResult.value = { valid: false, errors: [error instanceof Error ? error.message : "Failed to handle uploaded file"] };
+  }
 };
 
 const loadSchema = async () => {
@@ -4488,6 +4738,7 @@ const checkMigrationStatus = async () => {
                 @loadSchema="loadSchema"
                 @loadRawEndpoints="loadRawEndpoints"
                 @downloadSchema="downloadSchema"
+                @fileUploaded="handleFileUploaded"
               />
             </TabPanel>
             <TabPanel header="Endpoints">
