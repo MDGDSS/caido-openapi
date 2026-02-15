@@ -9,12 +9,16 @@
         <template #title>
           <div class="flex items-center justify-between">
             <span>{{ isQueryActive ? 'Filtered Test Results' : 'Test Results' }}<span v-if="isQueryActive" class="text-sm text-gray-500 ml-2">({{ filteredTestResults.length }} of {{ allTestResults.length }})</span></span>
-            <Button label="Clear All Results" icon="pi pi-trash" @click="$emit('clearAllResults')" severity="danger" size="small" />
+            <div class="flex items-center gap-2">
+              <InputText :modelValue="resultSearchQuery" @update:modelValue="$emit('update:resultSearchQuery', $event)" placeholder="Search results..." class="w-64" size="small" />
+              <Button v-if="resultSearchQuery.trim()" label="Clear Search" icon="pi pi-times" @click="$emit('clearResultSearch')" severity="secondary" size="small" />
+              <Button label="Clear All Results" icon="pi pi-trash" @click="$emit('clearAllResults')" severity="danger" size="small" />
+            </div>
           </div>
         </template>
         <template #content>
           <div class="space-y-2">
-            <div v-for="data in (isQueryActive ? filteredTestResults : allTestResults)" :key="getResultId(data)" class="border border-gray-200 dark:border-gray-700 rounded-lg">
+            <div v-for="data in filteredTestResults" :key="getResultId(data)" class="border border-gray-200 dark:border-gray-700 rounded-lg">
               <div class="p-4 hover:bg-gray-50 dark:hover:bg-gray-700 cursor-pointer" @click="$emit('toggleResultExpansion', getResultId(data))">
                 <div class="flex items-center justify-between">
                   <div class="flex items-center gap-4 flex-1">
@@ -31,8 +35,12 @@
               </div>
               <div v-if="isResultExpanded(getResultId(data))" class="border-t border-gray-200 dark:border-gray-700 h-[600px]">
                 <div class="flex h-full">
-                  <div class="w-1/2 border-r border-gray-200 dark:border-gray-700"><div class="h-full" :ref="el => setRequestEditorContainer(el, getResultId(data))"></div></div>
-                  <div class="w-1/2"><div class="h-full" :ref="el => setResponseEditorContainer(el, getResultId(data))"></div></div>
+                  <div class="w-1/2 border-r border-gray-200 dark:border-gray-700 overflow-hidden">
+                    <div class="h-full w-full" :ref="el => setRequestEditorContainer(el, getResultId(data))" style="display: flex; flex-direction: column;"></div>
+                  </div>
+                  <div class="w-1/2 overflow-hidden">
+                    <div class="h-full w-full" :ref="el => setResponseEditorContainer(el, getResultId(data))" style="display: flex; flex-direction: column;"></div>
+                  </div>
                 </div>
               </div>
             </div>
@@ -46,12 +54,14 @@
 <script setup lang="ts">
 import Button from "primevue/button";
 import Card from "primevue/card";
+import InputText from "primevue/inputtext";
 
 defineProps<{
   hasResults: boolean;
   isQueryActive: boolean;
   filteredTestResults: any[];
   allTestResults: any[];
+  resultSearchQuery: string;
   getResultId: (data: any) => string;
   isResultExpanded: (resultId: string) => boolean;
   getStatusClass: (success: boolean) => string;
@@ -65,6 +75,8 @@ defineProps<{
 defineEmits<{
   'clearAllResults': [];
   'toggleResultExpansion': [resultId: string];
+  'update:resultSearchQuery': [value: string];
+  'clearResultSearch': [];
 }>();
 </script>
 

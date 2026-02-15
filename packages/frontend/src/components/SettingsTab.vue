@@ -50,6 +50,18 @@
             <label for="allowDelete" class="text-sm font-medium">Allow DELETE in All Methods Test</label>
           </div>
           <p class="text-xs text-gray-500">When enabled, DELETE method will be included when running "All Methods" test. When disabled, DELETE requests will be skipped.</p>
+           <!-- TODO le remettre et corriger quand spam-->
+          <!-- <div class="flex items-center gap-2">
+            <input 
+              type="checkbox" 
+              id="disableGroupByTags" 
+              :checked="disableGroupByTags" 
+              @change="$emit('update:disableGroupByTags', ($event.target as HTMLInputElement).checked)" 
+              class="w-4 h-4 text-blue-600 bg-gray-100 border-gray-300 rounded focus:ring-blue-500 focus:ring-2" 
+            />
+            <label for="disableGroupByTags" class="text-sm font-medium">Disable Group by Tags</label>
+          </div>
+          <p class="text-xs text-gray-500">When checked, endpoints will not be grouped by tags in the Endpoints tab. By default, endpoints are grouped by their OpenAPI tags.</p> -->
         </div>
       </template>
     </Card>
@@ -156,6 +168,7 @@ const props = defineProps<{
   delayBetweenRequests: number;
   timeout: number;
   allowDeleteInAllMethods: boolean;
+  disableGroupByTags: boolean;
   defaultPlaceholders: {
     string: string;
     integer: number;
@@ -173,6 +186,7 @@ const emit = defineEmits<{
   'update:delayBetweenRequests': [value: number];
   'update:timeout': [value: number];
   'update:allowDeleteInAllMethods': [value: boolean];
+  'update:disableGroupByTags': [value: boolean];
   'update:placeholder': [key: string, value: any];
   'resetPlaceholders': [];
 }>();

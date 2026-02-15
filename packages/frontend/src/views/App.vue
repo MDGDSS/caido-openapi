@@ -27,15 +27,8 @@ import DetermineTab from "@/components/DetermineTab.vue";
 import * as yaml from 'js-yaml';
 
 const sdk = useSDK();
-
-//###################################
-// Constants
-//###################################
 const DEFAULT_BASE_URL = "https://localhost";
 
-//###################################
-// Utility Functions
-//###################################
 
 // GitHub star button function
 const openGitHubInBrowser = () => {
@@ -64,7 +57,6 @@ const getProjectKey = async (projectId?: string): Promise<string> => {
   try {
     const openapiValue = await sdk.env.getVar('openapi');
     if (openapiValue) {
-      //console.log(`Found 'openapi' env var: ${openapiValue}`);
       return openapiValue;
     }
   } catch (error) {
@@ -73,7 +65,6 @@ const getProjectKey = async (projectId?: string): Promise<string> => {
   
   // SECOND: If no openapi env var, use project ID if provided
   if (projectId) {
-    //console.log(`No 'openapi' env var found, using project ID as key: ${projectId}`);
     return projectId;
   }
   
@@ -133,6 +124,7 @@ const workers = ref(10);
 const delayBetweenRequests = ref(100);
 const timeout = ref(30000);
 const allowDeleteInAllMethods = ref(false);
+const disableGroupByTags = ref(false); // Default: grouping enabled (so disableGroupByTags = false)
 const defaultPlaceholders = ref({
   string: 'string',
   integer: 0,
@@ -171,6 +163,7 @@ const variablesExpanded = ref(true);
 const stopTestRequested = ref(false);
 const expandedResults = ref<Set<string>>(new Set());
 const expandedTestCases = ref<Set<string>>(new Set());
+const collapsedGroups = ref<Set<string>>(new Set()); // Track which tag groups are collapsed
 const requestResponseTab = ref('request');
 // Test case specific variable values (these are overridden by sidebar values)
 const testCasePathVariableValues = ref<Record<string, Record<string, string>>>({});
@@ -186,6 +179,9 @@ const isQueryActive = ref(false);
 
 // Endpoint search functionality
 const endpointSearchQuery = ref("");
+
+// Results search functionality
+const resultSearchQuery = ref("");
 
 const parsedSchema = ref<any>(null);
 
@@ -262,12 +258,10 @@ const convertYamlToJson = (text: string): { converted: string; wasYaml: boolean 
 // Use debouncing to avoid converting on every keystroke
 let schemaUpdateTimeout: ReturnType<typeof setTimeout> | null = null;
 const handleSchemaTextUpdate = (text: string) => {
- //  console.log('[Schema Update] handleSchemaTextUpdate called, text length:', text.length);
   
   // Clear any pending timeout
   if (schemaUpdateTimeout) {
     clearTimeout(schemaUpdateTimeout);
-   //  console.log('[Schema Update] Cleared previous timeout');
   }
   
   // Update the text immediately
@@ -275,7 +269,6 @@ const handleSchemaTextUpdate = (text: string) => {
   
   // Debounce YAML conversion - only convert after user stops typing for 500ms
   schemaUpdateTimeout = setTimeout(async () => {
-    //console.log('[YAML Conversion] Starting conversion check after debounce');
     
     // Try to convert YAML to JSON
     const { converted, wasYaml } = convertYamlToJson(text);
@@ -283,7 +276,6 @@ const handleSchemaTextUpdate = (text: string) => {
     
     // Only update if conversion happened (text changed)
     if (wasYaml && converted !== text) {
-     //  console.log('[YAML Conversion] YAML detected, converting to JSON');
       schemaText.value = converted;
       
       // Save immediately after conversion
@@ -305,8 +297,6 @@ const handleSchemaTextUpdate = (text: string) => {
             
               const convertedSize = converted.length;
               const CHUNK_SIZE = 1000 * 1024; // 600KB
-           //  console.log('[YAML Conversion] Saving schemaText separately for session:', currentSessionId.value, `(${(convertedSize / 1024 / 1024).toFixed(2)} MB)`);
-            
             if (convertedSize <= CHUNK_SIZE) {
               // Small enough to save in one call
               const result = await sdk.backend.saveSchemaTextToDb(projectKey, currentSessionId.value, converted);
@@ -319,7 +309,6 @@ const handleSchemaTextUpdate = (text: string) => {
               // Too large - need to chunk
               const numChunks = Math.ceil(convertedSize / CHUNK_SIZE);
               const metadata = { chunks: numChunks, totalLength: convertedSize };
-             //  console.log(`[YAML Conversion] Chunking schemaText into ${numChunks} chunks`);
               
               // Save chunks sequentially
               for (let i = 0; i < numChunks; i++) {
@@ -351,10 +340,9 @@ const handleSchemaTextUpdate = (text: string) => {
                   throw new Error(`Failed to save chunk ${i}: ${result.error}`);
                 }
                 
-             //    console.log(`[YAML Conversion] Saved chunk ${i + 1}/${numChunks} (${(chunk.length / 1024).toFixed(2)} KB)`);
               }
               
-           //    console.log('[YAML Conversion] SchemaText saved successfully in chunks');
+         
             }
           } catch (saveError) {
           //   console.error('[YAML Conversion] Exception saving schemaText:', saveError);
@@ -367,7 +355,6 @@ const handleSchemaTextUpdate = (text: string) => {
         validateSchema();
       });
     } else {
-     //  console.log('[YAML Conversion] Not YAML or no conversion needed');
       // Trigger validation for JSON
       validateSchema();
     }
@@ -453,7 +440,6 @@ const saveCurrentSession = async () => {
     
     // If session has no input data and no test results, don't save (prevent errors)
     if (!hasSchemaText && !hasRawEndpoints && !hasTestCases && !hasTestResults) {
-    //  console.log('[Save Session] Skipping save: session is empty (no input data)');
       return;
     }
     
@@ -505,7 +491,6 @@ const loadSession = async (sessionId: string) => {
       return;
     }
     
-    //console.log(`Loading session: ${session.name} (${session.id})`);
    /* console.log(`Session data:`, {
       hasSchemaText: !!session.schemaText,
       schemaTextLength: session.schemaText?.length || 0,
@@ -544,6 +529,7 @@ const loadSession = async (sessionId: string) => {
     testCaseBodyVariableValues.value = {};
     validationResult.value = null;
     endpointSearchQuery.value = '';
+    resultSearchQuery.value = '';
     filteredTestResults.value = [];
     testErrorMessage.value = null;
     runningTests.value.clear();
@@ -644,7 +630,6 @@ const loadSession = async (sessionId: string) => {
     }
     
     currentSessionId.value = sessionId;
-    //console.log(`Session ${sessionId} loaded successfully. Current session ID: ${currentSessionId.value}`);
     
     // Clear loading flag after a short delay to allow all reactive updates to complete
     await new Promise(resolve => setTimeout(resolve, 100));
@@ -746,7 +731,6 @@ const saveSingleSessionToStorage = async (session: OpenAPISession) => {
     const hasTestResults = session.testResults && session.testResults.length > 0;
     
     if (!hasSchemaText && !hasRawEndpoints && !hasTestCases && !hasTestResults) {
-      console.log('[Save Single Session] Skipping save: session is empty (no input data)');
       return;
     }
     
@@ -886,7 +870,6 @@ const saveSingleSessionToStorage = async (session: OpenAPISession) => {
             //console.log(`[Save Single Session] Saved chunk ${i + 1}/${numChunks} for session ${session.id} (${(chunk.length / 1024).toFixed(2)} KB)`);
           }
           
-          //console.log(`[Save Single Session] Successfully saved all ${numChunks} chunks for session ${session.id}`);
         }
       } catch (error) {
         console.error(`[Save Single Session] Exception saving schemaText for session ${session.id}:`, error);
@@ -931,8 +914,7 @@ const saveSingleSessionToStorage = async (session: OpenAPISession) => {
     let payloadSizeMB = parseFloat((payloadJson.length / 1024 / 1024).toFixed(2));
     const MAX_PAYLOAD_SIZE_MB = 1.6; // 1MB limit
     
-    //console.log(`[Save Single Session] Prepared ${sessionsDataWithSchema.length} sessions (with schemaText) for saving, payload: ${payloadSizeMB} MB`);
-    
+
     // If payload is too large, exclude schemaText
     let sessionsData = sessionsDataWithSchema;
     if (payloadSizeMB > MAX_PAYLOAD_SIZE_MB) {
@@ -1016,7 +998,6 @@ const saveSessionsToStorage = async () => {
       }
     }
     
-    //console.log('[Save Sessions] Using batching: saving parsedSchema and schemaText separately, then session data');
     
     // Step 1: Save parsedSchema separately for each session (batching to avoid payload size issues)
     const parsedSchemaSavePromises: Promise<void>[] = [];
@@ -1088,11 +1069,9 @@ const saveSessionsToStorage = async () => {
                 // Too large - need to chunk
                 const numChunks = Math.ceil(schemaTextSize / CHUNK_SIZE);
                 const metadata = { chunks: numChunks, totalLength: schemaTextSize };
-                //console.log(`[Save Sessions] Chunking schemaText for session ${session.id} into ${numChunks} chunks`);
                 
                 // Validate required parameters
                 if (!projectKey || !session.id) {
-                 // console.error(`[Save Sessions] Invalid parameters: projectKey=${projectKey}, sessionId=${session.id}`);
                   throw new Error('Invalid projectKey or sessionId');
                 }
                 
@@ -1178,8 +1157,7 @@ const saveSessionsToStorage = async () => {
     let payloadSizeMB = parseFloat((payloadJson.length / 1024 / 1024).toFixed(2));
     const MAX_PAYLOAD_SIZE_MB = 1.6; // 1MB limit
     
-    //console.log(`[Save Sessions] Prepared ${sessionsDataWithSchema.length} sessions (with schemaText) for saving, payload: ${payloadSizeMB} MB`);
-    
+
     // If payload is too large, exclude schemaText
     let sessionsData = sessionsDataWithSchema;
     if (payloadSizeMB > MAX_PAYLOAD_SIZE_MB) {
@@ -1212,7 +1190,7 @@ const saveSessionsToStorage = async () => {
       
       payloadJson = JSON.stringify(sessionsData);
       payloadSizeMB = parseFloat((payloadJson.length / 1024 / 1024).toFixed(2));
-      //console.log(`[Save Sessions] After excluding schemaText, payload: ${payloadSizeMB} MB`);
+
     } else {
       schemaTextExcluded.value = false;
     }
@@ -1248,11 +1226,11 @@ const loadSessionsFromStorage = async () => {
         // If no env var, use currentProjectId (which should be project ID) as fallback
         if (currentProjectId.value && currentProjectId.value !== 'default') {
           projectKey = currentProjectId.value;
-          //console.log(`No 'openapi' env var found, using currentProjectId as key: ${currentProjectId.value}`);
+
         } else {
           // Last resort: use 'default' if currentProjectId is not set or is 'default'
           projectKey = 'default';
-          //console.log(`No 'openapi' env var and no valid currentProjectId, using 'default' key`);
+
         }
       }
     } catch (error) {
@@ -1260,15 +1238,10 @@ const loadSessionsFromStorage = async () => {
       // Fall back to currentProjectId if available
       if (currentProjectId.value && currentProjectId.value !== 'default') {
         projectKey = currentProjectId.value;
-        //console.log(`Using currentProjectId as fallback: ${currentProjectId.value}`);
       } else {
         projectKey = 'default';
-        //console.log(`Using 'default' as fallback`);
       }
     }
-    
-    //const storageKey = `openapi-sessions-${projectKey}`;
-    //console.log(`Loading sessions for project key: ${projectKey}`);
     
     let sessionsData = null;
     
@@ -1287,8 +1260,9 @@ const loadSessionsFromStorage = async () => {
     
     // Don't load sessions from other projects - only load from the current project key
     // This prevents cross-contamination between projects
+  
     if (!sessionsData || !Array.isArray(sessionsData) || sessionsData.length === 0) {
-     // console.log(`[Load Sessions] No sessions found for project key: ${projectKey}`);
+
     }
     
     // Also check if sessionsData is an object with sessions property
@@ -1313,8 +1287,6 @@ const loadSessionsFromStorage = async () => {
     //  console.log(`[Load Sessions] Processing ${sessionsData.length} sessions...`);
       
       try {
-        // Load schemaText separately for each session (batching)
-     //   console.log(`[Load Sessions] Loading schemaText separately for ${sessionsData.length} sessions`);
         const schemaTextLoadPromises = sessionsData.map(async (session) => {
           if (session.id) {
             try {
@@ -1430,16 +1402,78 @@ const hasResults = computed(() => {
 
 // Filtered test cases based on search query
 const displayTestCases = computed(() => {
-  if (!endpointSearchQuery.value.trim()) {
-    return testCases.value;
+  // Filter out any null/undefined test cases first, and ensure they have required properties
+  let filtered = testCases.value.filter(tc => tc != null && typeof tc === 'object' && tc.path);
+  
+  // Apply search filter if query exists
+  if (endpointSearchQuery.value.trim()) {
+    const query = endpointSearchQuery.value.toLowerCase();
+    filtered = filtered.filter(tc => 
+      tc && (
+        (tc.path && tc.path.toLowerCase().includes(query)) ||
+        (tc.method && tc.method.toLowerCase().includes(query)) ||
+        (tc.name && tc.name.toLowerCase().includes(query)) ||
+        (tc.description && tc.description.toLowerCase().includes(query))
+      )
+    );
   }
-  const query = endpointSearchQuery.value.toLowerCase();
-  return testCases.value.filter(tc => 
-    tc.path.toLowerCase().includes(query) ||
-    tc.method.toLowerCase().includes(query) ||
-    (tc.name && tc.name.toLowerCase().includes(query)) ||
-    (tc.description && tc.description.toLowerCase().includes(query))
-  );
+  
+  // Group by tags if enabled (default: enabled, so disableGroupByTags = false means grouping is ON)
+  if (!disableGroupByTags.value) {
+    // Group test cases by tags
+    const grouped = new Map<string, any[]>();
+    const untagged: any[] = [];
+    const seenTestCases = new Set<string>(); // Track unique test cases to avoid duplicates in untagged
+    
+    filtered.forEach(tc => {
+      const tags = tc.tags || [];
+      const tcId = getTestCaseId(tc);
+      
+      if (tags.length === 0) {
+        // Only add to untagged if we haven't seen it yet
+        if (!seenTestCases.has(tcId)) {
+          untagged.push(tc);
+          seenTestCases.add(tcId);
+        }
+      } else {
+        // Add to all tags this endpoint belongs to
+        tags.forEach(tag => {
+          if (!grouped.has(tag)) {
+            grouped.set(tag, []);
+          }
+          // Only add if not already in this group (avoid duplicates within same group)
+          const groupCases = grouped.get(tag)!;
+          if (!groupCases.some(existing => getTestCaseId(existing) === tcId)) {
+            groupCases.push(tc);
+          }
+        });
+      }
+    });
+    
+    // Convert to array with group markers
+    const result: any[] = [];
+    
+    // Add grouped endpoints
+    Array.from(grouped.entries()).sort(([a], [b]) => a.localeCompare(b)).forEach(([tag, cases]) => {
+      // Count unique cases in this group
+      const uniqueCases = Array.from(new Map(cases.map(tc => [getTestCaseId(tc), tc])).values());
+      const isCollapsed = collapsedGroups.value.has(tag);
+      result.push({ __isGroupHeader: true, __groupTag: tag, __groupCount: uniqueCases.length, __isCollapsed: isCollapsed });
+      // Only add endpoints if group is not collapsed
+      if (!isCollapsed) {
+        result.push(...uniqueCases);
+      }
+    });
+    
+    // Add untagged endpoints at the end without a group header
+    if (untagged.length > 0) {
+      result.push(...untagged);
+    }
+    
+    return result;
+  }
+  
+  return filtered;
 });
 
 const allTestResults = computed(() => {
@@ -1453,12 +1487,36 @@ const allTestResults = computed(() => {
       results.push(tc.result);
     }
   });
-  // Sort by creation date (newest first)
+  // Sort by creation date (newest first) - handle both ISO string and number timestamps
   return results.sort((a, b) => {
-    const timestampA = a.timestamp || 0;
-    const timestampB = b.timestamp || 0;
+    const timestampA = a.timestamp ? (typeof a.timestamp === 'string' ? new Date(a.timestamp).getTime() : a.timestamp) : 0;
+    const timestampB = b.timestamp ? (typeof b.timestamp === 'string' ? new Date(b.timestamp).getTime() : b.timestamp) : 0;
     return timestampB - timestampA; // Newest first
   });
+});
+
+// Filtered test results based on search query
+const displayTestResults = computed(() => {
+  if (!resultSearchQuery.value.trim()) {
+    return allTestResults.value;
+  }
+  const query = resultSearchQuery.value.toLowerCase();
+  return allTestResults.value.filter(result => {
+    const testCase = result.testCase || {};
+    return (
+      (testCase.path && testCase.path.toLowerCase().includes(query)) ||
+      (testCase.method && testCase.method.toLowerCase().includes(query)) ||
+      (testCase.name && testCase.name.toLowerCase().includes(query)) ||
+      (testCase.description && testCase.description.toLowerCase().includes(query)) ||
+      (result.status && String(result.status).includes(query)) ||
+      (result.error && result.error.toLowerCase().includes(query))
+    );
+  });
+});
+
+// Update isQueryActive to be computed based on search query
+const isResultQueryActive = computed(() => {
+  return resultSearchQuery.value.trim().length > 0;
 });
 
 // Sorted body variables for alphabetical display
@@ -1894,8 +1952,11 @@ const handleFileUploaded = async (uploadedSchemaText: string, uploadedTestCases:
   try {
     isRawMode.value = false;
     
-    // Update schema text
+    // Update schema text - this will trigger the watch in InputTab
     schemaText.value = uploadedSchemaText;
+    
+    // Also clear rawEndpoints to ensure clean state
+    rawEndpoints.value = '';
     
     // Update validation result (from backend)
     validationResult.value = { valid: true, errors: [] };
@@ -1907,6 +1968,9 @@ const handleFileUploaded = async (uploadedSchemaText: string, uploadedTestCases:
     testCases.value = uploadedTestCases;
     isSchemaLoaded.value = true;
     activeTab.value = 1; // Switch to test cases tab
+    
+    // Wait a bit to ensure all reactive updates are processed
+    await nextTick();
     
     // Auto-save session after loading schema
     await saveCurrentSession();
@@ -2780,25 +2844,20 @@ const generatePathVariableCombinations = (testCase: any): Record<string, string>
     let values: string[] = [];
     
     // First check test case specific values (primary)
-    // Check if the value exists (even if it's an empty string, we need to check it explicitly)
+    // Only use test case value if it's not empty
     const testCaseValueObj = testCasePathVariableValues.value[testCaseId];
     if (testCaseValueObj && variable in testCaseValueObj) {
       const testCaseValue = String(testCaseValueObj[variable] || '').trim();
       if (testCaseValue !== '') {
         // Local override exists and is not empty - use ONLY this value (single test)
         values = [testCaseValue];
-        console.log(`[Path Combinations] Using local override for ${variable}: "${testCaseValue}" (1 combination)`);
-      } else {
-        // Local override exists but is empty - don't use global values, use empty string
-        values = [''];
-        console.log(`[Path Combinations] Local override for ${variable} is empty, using empty string`);
       }
+      // If test case value is empty, fall through to sidebar values (don't use empty string)
     }
     
-    // If no test case values (no local override), check sidebar values (fallback)
+    // If no test case values or test case value is empty, check sidebar values (fallback)
     if (values.length === 0 && pathVariableValues.value[variable] && pathVariableValues.value[variable].length > 0) {
       values = pathVariableValues.value[variable].filter(v => v.trim() !== '');
-      console.log(`[Path Combinations] Using global values for ${variable}: ${values.length} values`);
     }
     
     if (values.length === 0) {
@@ -2831,7 +2890,6 @@ const generatePathVariableCombinations = (testCase: any): Record<string, string>
   };
   
   generateCombinations({}, 0);
-  console.log(`[Path Combinations] Generated ${combinations.length} combinations for test case ${testCaseId}`);
   return combinations;
 };
 
@@ -2932,15 +2990,16 @@ const setResponseEditorContainer = (el: HTMLElement | null, resultId: string) =>
 };
 
 const createNativeCaidoEditors = (testResult: any) => {
+  
   try {
     const resultId = getResultId(testResult);
-    
-    // Get the containers for this specific result
+
     const requestContainer = requestEditorContainers.value.get(resultId);
     const responseContainer = responseEditorContainers.value.get(resultId);
     
     // Wait a bit for containers to be available
     if (!requestContainer || !responseContainer) {
+      console.log('[Caido Editors] Containers not ready, retrying...', { requestContainer: !!requestContainer, responseContainer: !!responseContainer });
       setTimeout(() => createNativeCaidoEditors(testResult), 100);
       return;
     }
@@ -2948,6 +3007,16 @@ const createNativeCaidoEditors = (testResult: any) => {
     // Ensure containers are empty before creating new editors
     requestContainer.innerHTML = '';
     responseContainer.innerHTML = '';
+    
+    // Set container styles to ensure editors display properly
+    requestContainer.style.width = '100%';
+    requestContainer.style.height = '100%';
+    requestContainer.style.display = 'flex';
+    requestContainer.style.flexDirection = 'column';
+    responseContainer.style.width = '100%';
+    responseContainer.style.height = '100%';
+    responseContainer.style.display = 'flex';
+    responseContainer.style.flexDirection = 'column';
 
     // Create request editor
     if (requestContainer) {
@@ -2956,36 +3025,41 @@ const createNativeCaidoEditors = (testResult: any) => {
       const requestContent = formatRequestForCaido(testResult);
       
       try {
-        // Try different possible SDK method names
-        let requestEditorInstance;
-        if (sdk.ui.httpRequestEditor) {
-          requestEditorInstance = sdk.ui.httpRequestEditor();
-        } else if (sdk.ui.createHttpRequestEditor) {
-          requestEditorInstance = sdk.ui.createHttpRequestEditor();
-        } else if (sdk.ui.requestEditor) {
-          requestEditorInstance = sdk.ui.requestEditor();
-        } else {
+        // Use Caido's native HTTPRequestEditor interface
+        // https://developer.caido.io/reference/sdks/frontend/editor.html
+        if (!sdk.ui?.httpRequestEditor) {
           return;
         }
         
-        const requestElement = requestEditorInstance.getElement();
+        // Create HTTPRequestEditor instance
+        const requestEditor: { getElement: () => HTMLElement; getEditorView: () => any } = sdk.ui.httpRequestEditor();
+        
+        // Get the editor element and append to container
+        const requestElement = requestEditor.getElement();
+        if (requestElement instanceof HTMLElement) {
+          requestElement.style.width = '100%';
+          requestElement.style.height = '100%';
+          requestElement.style.flex = '1';
+        }
         requestContainer.appendChild(requestElement);
         
         // Set request content with delay to ensure editor is ready
         setTimeout(() => {
           try {
-            const requestView = requestEditorInstance?.getEditorView();
-            if (requestView) {
-              requestView.dispatch({
+            // Get the CodeMirror EditorView
+            const editorView = requestEditor.getEditorView();
+            if (editorView) {
+              // Replace entire content using CodeMirror dispatch
+              editorView.dispatch({
                 changes: {
                   from: 0,
-                  to: requestView.state.doc.length,
+                  to: editorView.state.doc.length,
                   insert: requestContent,
                 },
               });
             }
           } catch (e) {
-            // Silent fail
+            console.error('[Caido Editors] Failed to set request content:', e);
           }
           // Attach contextual menu to request container after content is set
           try {
@@ -2993,7 +3067,7 @@ const createNativeCaidoEditors = (testResult: any) => {
           } catch (_) {}
         }, 200);
       } catch (e) {
-        // Silent fail
+        console.error('[Caido Editors] Failed to create request editor:', e);
       }
     }
 
@@ -3003,44 +3077,50 @@ const createNativeCaidoEditors = (testResult: any) => {
       const responseContent = formatResponseForCaido(testResult);
       
       try {
-        // Try different possible SDK method names
-        let responseEditorInstance;
-        if (sdk.ui.httpResponseEditor) {
-          responseEditorInstance = sdk.ui.httpResponseEditor();
-        } else if (sdk.ui.createHttpResponseEditor) {
-          responseEditorInstance = sdk.ui.createHttpResponseEditor();
-        } else if (sdk.ui.responseEditor) {
-          responseEditorInstance = sdk.ui.responseEditor();
-        } else {
+        // Use Caido's native HTTPResponseEditor interface
+        // https://developer.caido.io/reference/sdks/frontend/editor.html
+        if (!sdk.ui?.httpResponseEditor) {
           return;
         }
         
-        const responseElement = responseEditorInstance.getElement();
+        // Create HTTPResponseEditor instance
+        const responseEditor: { getElement: () => HTMLElement; getEditorView: () => any } = sdk.ui.httpResponseEditor();
+        
+        // Get the editor element and append to container
+        const responseElement = responseEditor.getElement();
+        if (responseElement instanceof HTMLElement) {
+          responseElement.style.width = '100%';
+          responseElement.style.height = '100%';
+          responseElement.style.flex = '1';
+        }
         responseContainer.appendChild(responseElement);
         
         // Set response content with delay to ensure editor is ready
         setTimeout(() => {
           try {
-            const responseView = responseEditorInstance?.getEditorView();
-            if (responseView) {
-              responseView.dispatch({
+            // Get the CodeMirror EditorView
+            const editorView = responseEditor.getEditorView();
+            if (editorView) {
+              // Replace entire content using CodeMirror dispatch
+              editorView.dispatch({
                 changes: {
                   from: 0,
-                  to: responseView.state.doc.length,
+                  to: editorView.state.doc.length,
                   insert: responseContent,
                 },
               });
             }
           } catch (e) {
-            // Silent fail
+            console.error('[Caido Editors] Failed to set response content:', e);
           }
         }, 200);
       } catch (e) {
-        // Silent fail
+        console.error('[Caido Editors] Failed to create response editor:', e);
       }
     }
+    
   } catch (error) {
-    console.error('Failed to create native Caido editors:', error);
+    console.error('[Caido Editors] Failed to create native Caido editors:', error);
   }
 };
 
@@ -3100,9 +3180,9 @@ const setupGlobalRequestContextMenu = () => {
     const target = e.target as HTMLElement;
     const action = target.getAttribute('data-action');
     const rid = menu.getAttribute('data-result-id') || '';
-    let testResult = allTestResults.value.find(r => getResultId(r) === rid)
-      || testResults.value.find(r => getResultId(r) === rid)
-      || filteredTestResults.value.find(r => getResultId(r) === rid);
+    let testResult = displayTestResults.value.find(r => getResultId(r) === rid)
+      || allTestResults.value.find(r => getResultId(r) === rid)
+      || testResults.value.find(r => getResultId(r) === rid);
     // Focus the editor to make Caido shortcuts work reliably
     try {
       const focusable = document.querySelector(`.request-editor-container[data-result-id="${rid}"] .cm-content, .request-editor-container[data-result-id="${rid}"] textarea`) as HTMLElement | null;
@@ -3467,7 +3547,6 @@ const getUniqueHeaderParameters = () => {
 
 const toggleResultExpansion = (resultId: string) => {
   if (expandedResults.value.has(resultId)) {
-    // If clicking on already expanded result, close it
     expandedResults.value.delete(resultId);
   } else {
     // If expanding a new result, close all others first (only one expanded at a time)
@@ -3480,8 +3559,25 @@ const isResultExpanded = (resultId: string) => {
   return expandedResults.value.has(resultId);
 };
 
+const toggleGroupCollapse = (groupTag: string) => {
+  if (collapsedGroups.value.has(groupTag)) {
+    collapsedGroups.value.delete(groupTag);
+  } else {
+    collapsedGroups.value.add(groupTag);
+  }
+};
+
+const isGroupCollapsed = (groupTag: string) => {
+  return collapsedGroups.value.has(groupTag);
+};
+
 const toggleTestCaseExpansion = (testCase: any) => {
-  const testCaseId = `${testCase.method}-${testCase.path}`;
+  // Don't allow expanding group headers or invalid test cases
+  if (!testCase || testCase.__isGroupHeader || !testCase.path) {
+    return;
+  }
+  
+  const testCaseId = getTestCaseId(testCase);
   if (expandedTestCases.value.has(testCaseId)) {
     expandedTestCases.value.delete(testCaseId);
   } else {
@@ -3490,7 +3586,12 @@ const toggleTestCaseExpansion = (testCase: any) => {
 };
 
 const isTestCaseExpanded = (testCase: any) => {
-  const testCaseId = `${testCase.method}-${testCase.path}`;
+  // Don't allow expanding group headers or invalid test cases
+  if (!testCase || testCase.__isGroupHeader || !testCase.path) {
+    return false;
+  }
+  
+  const testCaseId = getTestCaseId(testCase);
   return expandedTestCases.value.has(testCaseId);
 };
 
@@ -3518,11 +3619,15 @@ const getTestCaseBodyVariables = (testCase: any) => {
     }
   });
   
-  // Override with test case specific values (highest priority)
+  // Override with test case specific values (highest priority) - only if not empty
   if (testCaseBodyVariableValues.value[testCaseId]) {
     Object.entries(testCaseBodyVariableValues.value[testCaseId]).forEach(([key, value]) => {
-      if (value !== undefined && value !== '') {
-        bodyVars[key] = value;
+      // Only override if value is not empty (empty string means use sidebar/global value)
+      if (value !== undefined) {
+        const valueStr = typeof value === 'string' ? value.trim() : String(value);
+        if (valueStr !== '') {
+          bodyVars[key] = value;
+        }
       }
     });
   }
@@ -3593,11 +3698,11 @@ const getTestCaseQueryParameters = (testCase: any) => {
   const queryVars: Record<string, string> = {};
   
   // Debug: Log all parameters to see what we're working with
-  if (testCase.parameters && testCase.parameters.length > 0) {
-    const queryParams = testCase.parameters.filter((p: any) => p.in === 'query');
-    console.log(`[Query Params] Test case ${testCaseId} has ${queryParams.length} query parameters:`, 
-      queryParams.map((p: any) => `${p.name} (in: ${p.in})`));
-  }
+  //if (testCase.parameters && testCase.parameters.length > 0) {
+    //const queryParams = testCase.parameters.filter((p: any) => p.in === 'query');
+   // console.log(`[Query Params] Test case ${testCaseId} has ${queryParams.length} query parameters:`, 
+    //  queryParams.map((p: any) => `${p.name} (in: ${p.in})`));
+  //}
   
   // Start with default query parameters from schema
   if (testCase.parameters) {
@@ -3613,7 +3718,6 @@ const getTestCaseQueryParameters = (testCase: any) => {
           defaultValue = String(param.schema.default);
         }
         queryVars[param.name] = defaultValue;
-        console.log(`[Query Params] Added query param ${param.name} with default value: "${defaultValue}"`);
       }
     });
   }
@@ -3622,29 +3726,30 @@ const getTestCaseQueryParameters = (testCase: any) => {
   if (testCase.parameters) {
     testCase.parameters.forEach((param: any) => {
       if (param.in === 'query' && param.name) {
-        // Check global query parameter values if test case specific value is not set
-        if (!testCaseQueryParameterValues.value[testCaseId]?.[param.name]) {
+        // Check if test case has a non-empty value
+        const testCaseValue = testCaseQueryParameterValues.value[testCaseId]?.[param.name];
+        const hasTestCaseValue = testCaseValue !== undefined && String(testCaseValue).trim() !== '';
+        
+        // Only use global values if test case value is not set or is empty
+        if (!hasTestCaseValue) {
           const globalValues = queryParameterValues.value[param.name];
           if (globalValues && globalValues.length > 0 && globalValues[0].trim() !== '') {
             queryVars[param.name] = globalValues[0];
-            console.log(`[Query Params] Overrode ${param.name} with global value: "${globalValues[0]}"`);
           }
         }
       }
     });
   }
   
-  // Override with test case specific values (highest priority)
+  // Override with test case specific values (highest priority) - only if not empty
   if (testCaseQueryParameterValues.value[testCaseId]) {
     Object.entries(testCaseQueryParameterValues.value[testCaseId]).forEach(([key, value]) => {
-      if (value !== undefined && value !== '') {
+      if (value !== undefined && String(value).trim() !== '') {
         queryVars[key] = value;
-        console.log(`[Query Params] Overrode ${key} with test case specific value: "${value}"`);
       }
     });
   }
-  
-  console.log(`[Query Params] Final query vars for test case ${testCaseId}:`, Object.keys(queryVars));
+
   return queryVars;
 };
 
@@ -3674,8 +3779,12 @@ const getTestCaseHeaderParameters = (testCase: any) => {
   if (testCase.parameters) {
     testCase.parameters.forEach((param: any) => {
       if (param.in === 'header' && param.name) {
-        // Check global header parameter values if test case specific value is not set
-        if (!testCaseHeaderParameterValues.value[testCaseId]?.[param.name]) {
+        // Check if test case has a non-empty value
+        const testCaseValue = testCaseHeaderParameterValues.value[testCaseId]?.[param.name];
+        const hasTestCaseValue = testCaseValue !== undefined && String(testCaseValue).trim() !== '';
+        
+        // Only use global values if test case value is not set or is empty
+        if (!hasTestCaseValue) {
           const globalValues = headerParameterValues.value[param.name];
           if (globalValues && globalValues.length > 0 && globalValues[0].trim() !== '') {
             headerVars[param.name] = globalValues[0];
@@ -3685,10 +3794,10 @@ const getTestCaseHeaderParameters = (testCase: any) => {
     });
   }
   
-  // Override with test case specific values (highest priority)
+  // Override with test case specific values (highest priority) - only if not empty
   if (testCaseHeaderParameterValues.value[testCaseId]) {
     Object.entries(testCaseHeaderParameterValues.value[testCaseId]).forEach(([key, value]) => {
-      if (value !== undefined && value !== '') {
+      if (value !== undefined && String(value).trim() !== '') {
         headerVars[key] = value;
       }
     });
@@ -3759,7 +3868,6 @@ const downloadSchema = () => {
     
     // If schemaText is empty, try to reconstruct from parsed schema
     if (!schemaToDownload && parsedSchema.value) {
-      console.log('[Download Schema] Reconstructing schema from parsed data');
       // Reconstruct a minimal OpenAPI schema from parsed data
       const reconstructed: any = {
         openapi: parsedSchema.value.openapi || '3.0.0',
@@ -3810,8 +3918,6 @@ const downloadSchema = () => {
     link.click();
     document.body.removeChild(link);
     URL.revokeObjectURL(url);
-    
-    console.log('[Download Schema] Schema downloaded successfully');
   } catch (error) {
     console.error('[Download Schema] Failed to download schema:', error);
   }
@@ -3830,6 +3936,10 @@ const clearAllResults = () => {
 
 const clearEndpointSearch = () => {
   endpointSearchQuery.value = "";
+};
+
+const clearResultSearch = () => {
+  resultSearchQuery.value = "";
 };
 
 
@@ -3938,8 +4048,18 @@ const formatExampleValue = (schema: any): string => {
 // Watchers and Lifecycle Hooks
 //###################################
 
+// Clear expanded test cases when grouping is toggled to prevent Vue reactivity issues
+watch(disableGroupByTags, (newValue, oldValue) => {
+  // Only clear if the value actually changed (not on initial load)
+  if (newValue !== oldValue) {
+    // Clear all expanded test cases SYNCHRONOUSLY before Vue re-renders
+    // This prevents Vue from trying to render expanded content for items that no longer exist
+    // Must be done synchronously, not in nextTick, to prevent DOM errors
+    expandedTestCases.value.clear();
+  }
+}, { immediate: false });
+
 watch(expandedResults, (newExpanded) => {
-  
   // Clear all container contents to ensure clean state
   for (const container of requestEditorContainers.value.values()) {
     container.innerHTML = '';
@@ -3953,23 +4073,23 @@ watch(expandedResults, (newExpanded) => {
     const expandedId = Array.from(newExpanded)[0];
     
     // Find the test result in all available arrays
-    //Even like that not fix try fix it for .9
-    // Try to find the result in allTestResults, testResults, and filteredTestResults
-    let testResult = allTestResults.value.find(result => getResultId(result) === expandedId);
+    // Try to find the result in displayTestResults, allTestResults, and testResults
+    let testResult = displayTestResults.value.find(result => getResultId(result) === expandedId);
+    if (!testResult) {
+      testResult = allTestResults.value.find(result => getResultId(result) === expandedId);
+    }
     if (!testResult) {
       testResult = testResults.value.find(result => getResultId(result) === expandedId);
     }
-    if (!testResult) {
-      testResult = filteredTestResults.value.find(result => getResultId(result) === expandedId);
-    }
     
     if (testResult) {
-      // Use nextTick to ensure DOM is updated, then create editors
       nextTick(() => {
         setTimeout(() => {
           createNativeCaidoEditors(testResult);
         }, 100); // Increased delay to ensure DOM is fully ready
       });
+    } else {
+      console.warn('[Caido Editors] Test result not found for ID:', expandedId);
     }
   }
 }, { deep: true });
@@ -4008,12 +4128,12 @@ const sendToReplay = () => {
     return;
   }
   
-  let testResult = allTestResults.value.find(result => getResultId(result) === expandedId);
+  let testResult = displayTestResults.value.find(result => getResultId(result) === expandedId);
   if (!testResult) {
-    testResult = testResults.value.find(result => getResultId(result) === expandedId);
+    testResult = allTestResults.value.find(result => getResultId(result) === expandedId);
   }
   if (!testResult) {
-    testResult = filteredTestResults.value.find(result => getResultId(result) === expandedId);
+    testResult = testResults.value.find(result => getResultId(result) === expandedId);
   }
   
   if (testResult) {
@@ -4027,6 +4147,7 @@ const sendToReplay = () => {
 
 // Setup keyboard shortcuts when component mounts
 onMounted(() => {
+  
   const cleanup = setupKeyboardShortcuts();
   // Setup a global right-click menu on request editors
   setupGlobalRequestContextMenu();
@@ -4035,9 +4156,9 @@ onMounted(() => {
     if (document.visibilityState === 'visible') {
       // Recreate editors for all expanded results
       Array.from(expandedResults.value).forEach((id) => {
-        let testResult = allTestResults.value.find(result => getResultId(result) === id)
-          || testResults.value.find(result => getResultId(result) === id)
-          || filteredTestResults.value.find(result => getResultId(result) === id);
+        let testResult = displayTestResults.value.find(result => getResultId(result) === id)
+          || allTestResults.value.find(result => getResultId(result) === id)
+          || testResults.value.find(result => getResultId(result) === id);
         if (testResult) {
           setTimeout(() => createNativeCaidoEditors(testResult), 50);
         }
@@ -4224,11 +4345,28 @@ onMounted(async () => {
         currentSessionId.value = null;
         
         // Load sessions for the new project
-        console.log(`[Project Change] Loading sessions for new project: ${newProjectKey}`);
+      //  console.log(`[Project Change] Loading sessions for new project: ${newProjectKey}`);
         await loadSessionsFromStorage();
         
+        // Note: loadSessionsFromStorage already loads the first session automatically if sessions exist
+        // So we just need to ensure currentSessionId is set correctly
+        if (sessions.value && sessions.value.length > 0) {
+          // Ensure currentSessionId is set to the first session
+          if (!currentSessionId.value || !sessions.value.find((s: any) => s.id === currentSessionId.value)) {
+            currentSessionId.value = sessions.value[0].id;
+          }
+        } else {
+          // Create a new session if no sessions exist (loadSessionsFromStorage should have done this, but just in case)
+          if (!currentSessionId.value) {
+            const newSession = createNewSession();
+            sessions.value = [newSession];
+            currentSessionId.value = newSession.id;
+          }
+        }
+        
         // Clear loading flag after sessions are loaded
-        await new Promise(resolve => setTimeout(resolve, 200));
+        // Use a small delay to ensure all reactive updates are processed
+        await nextTick();
         isLoadingSession.value = false;
       } else {
         //console.log('Project key unchanged, no action needed');
@@ -4359,6 +4497,7 @@ const loadGlobalSettings = async () => {
       if (settings.delayBetweenRequests !== undefined) delayBetweenRequests.value = settings.delayBetweenRequests;
       if (settings.timeout !== undefined) timeout.value = settings.timeout;
       if (settings.allowDeleteInAllMethods !== undefined) allowDeleteInAllMethods.value = settings.allowDeleteInAllMethods;
+      if (settings.disableGroupByTags !== undefined) disableGroupByTags.value = settings.disableGroupByTags;
       if (settings.defaultPlaceholders) {
         defaultPlaceholders.value = { ...defaultPlaceholders.value, ...settings.defaultPlaceholders };
       }
@@ -4375,6 +4514,7 @@ const saveGlobalSettings = async () => {
       delayBetweenRequests: delayBetweenRequests.value,
       timeout: timeout.value,
       allowDeleteInAllMethods: allowDeleteInAllMethods.value,
+      disableGroupByTags: disableGroupByTags.value,
       defaultPlaceholders: defaultPlaceholders.value
     };
     const result = await sdk.backend.saveGlobalSettingsToDb(settings);
@@ -4517,7 +4657,6 @@ const migrateLocalStorageToDb = async () => {
       
       // If still no sessions loaded, create a new one
       if (!loaded) {
-        console.log('No sessions found after migration, creating new session');
         const newSession = createNewSession();
         sessions.value = [newSession];
         await loadSession(newSession.id);
@@ -4556,7 +4695,6 @@ const hasLocalStorageData = ref(false);
 // Check migration status on mount
 const checkMigrationStatus = async () => {
   try {
-    //console.log('Checking migration status...');
     
     // Check if the function exists and is callable (in case extension needs reload)
     // Use try-catch to safely check if the function exists
@@ -4586,7 +4724,6 @@ const checkMigrationStatus = async () => {
             if (sdk.backend.loadSessionsFromDb && typeof sdk.backend.loadSessionsFromDb === 'function') {
               const sessionsResult = await sdk.backend.loadSessionsFromDb(projectKey);
               if (sessionsResult.kind === "Ok" && sessionsResult.value && sessionsResult.value.length > 0) {
-                //console.log('Found sessions in database, assuming migration completed');
                 hasLocalStorageData.value = false;
                 return;
               }
@@ -4617,7 +4754,6 @@ const checkMigrationStatus = async () => {
       
       if (migrationCheck.kind === "Ok" && migrationCheck.value === true) {
         // Migration already done, don't show button even if localStorage has data
-        //console.log('Migration already completed, hiding button');
         hasLocalStorageData.value = false;
         return;
       }
@@ -4625,7 +4761,6 @@ const checkMigrationStatus = async () => {
       // Migration not done, check if localStorage has data
       try {
         const hasData = localStorage.getItem('openapi-testing-results') !== null;
-        console.log('Migration not completed, localStorage has data:', hasData);
         hasLocalStorageData.value = hasData;
       } catch {
         hasLocalStorageData.value = false;
@@ -4641,7 +4776,6 @@ const checkMigrationStatus = async () => {
             if (sdk.backend.loadSessionsFromDb && typeof sdk.backend.loadSessionsFromDb === 'function') {
               const sessionsResult = await sdk.backend.loadSessionsFromDb(projectKey);
               if (sessionsResult.kind === "Ok" && sessionsResult.value && sessionsResult.value.length > 0) {
-                console.log('Found sessions in database, assuming migration completed');
                 hasLocalStorageData.value = false;
                 return;
               }
@@ -4761,10 +4895,13 @@ const checkMigrationStatus = async () => {
                 :getStatusClass="getStatusClass"
                 :getStatusIcon="getStatusIcon"
                 :getTestCaseId="getTestCaseId"
+                :formatResponseTime="formatResponseTime"
                 :testErrorMessage="testErrorMessage"
                 :isRawMode="isRawMode"
                 :isDetermining="isDetermining"
+                :isGroupCollapsed="isGroupCollapsed"
                 @update:baseUrl="baseUrl = $event"
+                @toggleGroupCollapse="toggleGroupCollapse"
                 @update:customHeaders="customHeaders = $event"
                 @update:useRandomValues="useRandomValues = $event"
                 @update:endpointSearchQuery="endpointSearchQuery = $event"
@@ -4802,9 +4939,10 @@ const checkMigrationStatus = async () => {
             <TabPanel header="Results">
               <ResultsTab
                 :hasResults="hasResults"
-                :isQueryActive="isQueryActive"
-                :filteredTestResults="filteredTestResults"
+                :isQueryActive="isResultQueryActive"
+                :filteredTestResults="displayTestResults"
                 :allTestResults="allTestResults"
+                :resultSearchQuery="resultSearchQuery"
                 :getResultId="getResultId"
                 :isResultExpanded="isResultExpanded"
                 :getStatusClass="getStatusClass"
@@ -4815,6 +4953,8 @@ const checkMigrationStatus = async () => {
                 :setResponseEditorContainer="setResponseEditorContainer"
                 @clearAllResults="clearAllResults"
                 @toggleResultExpansion="toggleResultExpansion"
+                @update:resultSearchQuery="resultSearchQuery = $event"
+                @clearResultSearch="clearResultSearch"
               />
             </TabPanel>
             <TabPanel v-if="isRawMode" header="Determine">
@@ -4836,7 +4976,7 @@ const checkMigrationStatus = async () => {
             <div class="mb-3"><h4 class="text-md font-medium text-red-600 dark:text-red-400">Path Variables</h4><p class="text-xs text-gray-500 mt-1">Add multiple values to test different combinations. Each value will be tested separately.</p></div>
             <div class="space-y-3">
               <div v-for="variable in getUniquePathVariables()" :key="variable" class="space-y-2">
-                <div class="flex items-center justify-between"><label class="block text-sm font-medium text-gray-700 dark:text-gray-300">{{ variable }}</label><Button label="Add Value" icon="pi pi-plus" @click="addPathVariableValue(variable)" size="small" severity="success" class="text-xs px-2 py-1" /></div>
+                <div class="flex items-center justify-between"><label class="block text-sm font-medium text-gray-700 dark:text-gray-300">{{ variable }}</label><Button label="Add More" icon="pi pi-plus" @click="addPathVariableValue(variable)" size="small" severity="success" class="text-xs px-2 py-1" /></div>
                 <div class="space-y-2">
                   <div v-for="(value, index) in getPathVariableValue(variable)" :key="index" class="flex items-center gap-2">
                     <InputText :modelValue="(pathVariableValues[variable] && pathVariableValues[variable][index]) || ''" @update:modelValue="(val) => { if (!pathVariableValues[variable]) pathVariableValues[variable] = []; pathVariableValues[variable][index] = val; }" :placeholder="`Value ${index + 1} for ${variable}`" class="flex-1" @paste="handlePathVariablePaste(variable, $event)" />
@@ -4850,7 +4990,7 @@ const checkMigrationStatus = async () => {
             <div class="mb-3"><h4 class="text-md font-medium text-red-600 dark:text-red-400">Query Parameters</h4><p class="text-xs text-gray-500 mt-1">Add multiple values to test different combinations. Each value will be tested separately.</p></div>
             <div class="space-y-3">
               <div v-for="param in getUniqueQueryParameters()" :key="param" class="space-y-2">
-                <div class="flex items-center justify-between"><label class="block text-sm font-medium text-gray-700 dark:text-gray-300">{{ param }}</label><Button label="Add Value" icon="pi pi-plus" @click="addQueryParameterValue(param)" size="small" severity="success" class="text-xs px-2 py-1" /></div>
+                <div class="flex items-center justify-between"><label class="block text-sm font-medium text-gray-700 dark:text-gray-300">{{ param }}</label><Button label="Add More" icon="pi pi-plus" @click="addQueryParameterValue(param)" size="small" severity="success" class="text-xs px-2 py-1" /></div>
                 <div class="space-y-2">
                   <div v-for="(value, index) in getQueryParameterValue(param)" :key="index" class="flex items-center gap-2">
                     <InputText :modelValue="(queryParameterValues[param] && queryParameterValues[param][index]) || ''" @update:modelValue="(val) => { if (!queryParameterValues[param]) queryParameterValues[param] = []; queryParameterValues[param][index] = val; }" :placeholder="`Value ${index + 1} for ${param}`" class="flex-1" @paste="handleQueryParameterPaste(param, $event)" />
@@ -4864,7 +5004,7 @@ const checkMigrationStatus = async () => {
             <div class="mb-3"><h4 class="text-md font-medium text-red-600 dark:text-red-400">Header Parameters</h4><p class="text-xs text-gray-500 mt-1">Add multiple values to test different combinations. Each value will be tested separately.</p></div>
             <div class="space-y-3">
               <div v-for="param in getUniqueHeaderParameters()" :key="param" class="space-y-2">
-                <div class="flex items-center justify-between"><label class="block text-sm font-medium text-gray-700 dark:text-gray-300">{{ param }}</label><Button label="Add Value" icon="pi pi-plus" @click="addHeaderParameterValue(param)" size="small" severity="success" class="text-xs px-2 py-1" /></div>
+                <div class="flex items-center justify-between"><label class="block text-sm font-medium text-gray-700 dark:text-gray-300">{{ param }}</label><Button label="Add More" icon="pi pi-plus" @click="addHeaderParameterValue(param)" size="small" severity="success" class="text-xs px-2 py-1" /></div>
                 <div class="space-y-2">
                   <div v-for="(value, index) in getHeaderParameterValue(param)" :key="index" class="flex items-center gap-2">
                     <InputText :modelValue="(headerParameterValues[param] && headerParameterValues[param][index]) || ''" @update:modelValue="(val) => { if (!headerParameterValues[param]) headerParameterValues[param] = []; headerParameterValues[param][index] = val; }" :placeholder="`Value ${index + 1} for ${param}`" class="flex-1" @paste="handleHeaderParameterPaste(param, $event)" />
@@ -4878,7 +5018,7 @@ const checkMigrationStatus = async () => {
             <div class="mb-3"><h4 class="text-md font-medium text-red-600 dark:text-red-400">Body Variables</h4><p class="text-xs text-gray-500 mt-1">Customize request body parameters for POST/PUT/PATCH requests.</p></div>
             <div class="space-y-3">
               <div v-for="[key, value] in sortedBodyVariables" :key="key" class="space-y-2">
-                <div class="flex items-center justify-between"><label class="block text-sm font-medium text-gray-700 dark:text-gray-300">{{ key }}</label><Button label="Add Value" icon="pi pi-plus" @click="addBodyVariableValue(key)" size="small" severity="success" class="text-xs px-2 py-1" /></div>
+                <div class="flex items-center justify-between"><label class="block text-sm font-medium text-gray-700 dark:text-gray-300">{{ key }}</label><Button label="Add More" icon="pi pi-plus" @click="addBodyVariableValue(key)" size="small" severity="success" class="text-xs px-2 py-1" /></div>
                 <div class="space-y-2">
                   <div v-for="(value, index) in getBodyVariableValue(key)" :key="index" class="flex items-center gap-2">
                     <InputText :modelValue="(bodyVariableValues[key] && bodyVariableValues[key][index]) || ''" @update:modelValue="(val) => { if (!bodyVariableValues[key]) bodyVariableValues[key] = []; bodyVariableValues[key][index] = val; }" :placeholder="`Value ${index + 1} for ${key}`" class="flex-1" @paste="handleBodyVariablePaste(key, $event)" />
@@ -4899,11 +5039,13 @@ const checkMigrationStatus = async () => {
         :delayBetweenRequests="delayBetweenRequests"
         :timeout="timeout"
         :allowDeleteInAllMethods="allowDeleteInAllMethods"
+        :disableGroupByTags="disableGroupByTags"
         :defaultPlaceholders="defaultPlaceholders"
         @update:workers="(v) => { workers = v; saveGlobalSettings(); }"
         @update:delayBetweenRequests="(v) => { delayBetweenRequests = v; saveGlobalSettings(); }"
         @update:timeout="(v) => { timeout = v; saveGlobalSettings(); }"
         @update:allowDeleteInAllMethods="(v) => { allowDeleteInAllMethods = v; saveGlobalSettings(); }"
+        @update:disableGroupByTags="(v) => { disableGroupByTags = v; saveGlobalSettings(); }"
         @update:placeholder="updatePlaceholder"
         @resetPlaceholders="resetPlaceholders"
       />

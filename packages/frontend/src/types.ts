@@ -21,6 +21,7 @@ export interface FrontendSDK {
     validateSchema: (schemaText: string) => Promise<{ valid: boolean; errors: string[] }>;
     getSchemaInfo: (schemaText: string) => Promise<{ title: string; version: string; description?: string; pathCount: number; methodCount: number }>;
     testHttpRequest: (url: string) => Promise<{ success: boolean; status: number; response: string }>;
+    fetchSchemaFromUrl: (url: string) => Promise<{ kind: "Error"; error: string } | { kind: "Ok"; value: { content: string; contentType: string } }>;
     openTestResultInCaido: (testResult: any, baseUrl: string) => Promise<void>;
     setEnvironmentVariable: (options: { name: string; value: string; secret?: boolean; global?: boolean }) => Promise<{ success: boolean; value?: string; error?: string }>;
     // Database storage functions

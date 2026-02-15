@@ -1,13 +1,36 @@
 <template>
   <div>
-    <div class="mb-4 p-4 bg-blue-50 dark:bg-blue-900/20 rounded-lg">
+    <div class="mb-4 p-4  dark:bg-blue-900/20 rounded-lg">
       <h3 class="font-semibold text-blue-800 dark:text-blue-200 mb-2">Step 1: Input Your Schema</h3>
       <p class="text-sm text-blue-700 dark:text-blue-300">
-        Paste your OpenAPI schema (JSON/YAML) or raw endpoints. The application will auto-detect the format.
+        Paste your OpenAPI schema (JSON/YAML) or raw endpoints. The application will auto-detect the format. You can also fetch a schema from a URL or upload a file.
       </p>
     </div>
     <div class="space-y-4">
       <div><label class="block text-sm font-medium mb-2">Base URL</label><InputText :modelValue="baseUrl" @update:modelValue="$emit('update:baseUrl', $event)" placeholder="http://localhost:3000" class="w-full" /></div>
+      
+      <!-- URL Fetch -->
+      <div>
+        <div class="flex items-center gap-2 mb-2">
+          <label class="block text-sm font-medium flex-1">Fetch Schema from URL</label>
+          <Button 
+            label="Fetch" 
+            icon="pi pi-download" 
+            @click="handleUrlFetch" 
+            size="small"
+            severity="secondary"
+            :loading="isFetching"
+            :disabled="isFetching || !schemaUrl.trim()"
+            :title="'Fetch OpenAPI schema from URL (JSON/YAML) for faster processing'"
+          />
+        </div>
+        <InputText 
+          v-model="schemaUrl" 
+          placeholder="https://api.example.com/openapi.json or https://api.example.com/openapi.yaml" 
+          class="w-full"
+          @keyup.enter="handleUrlFetch"
+        />
+      </div>
       
       <!-- Unified Input -->
       <div>
@@ -112,6 +135,8 @@ const emit = defineEmits<{
 
 const fileInputRef = ref<HTMLInputElement | null>(null);
 const isUploading = ref(false);
+const isFetching = ref(false);
+const schemaUrl = ref('');
 
 // Unified input value
 const unifiedInput = ref('');
@@ -255,6 +280,127 @@ const triggerFileUpload = () => {
   fileInputRef.value?.click();
 };
 
+// Process fetched/uploaded content (shared logic for file upload and URL fetch)
+const processContent = async (content: string) => {
+  // First, detect if this is raw endpoints format
+  const detected = detectInputType(content);
+  
+  // If it's raw endpoints, handle it directly without backend processing
+  if (detected === 'Raw Endpoints') {
+    unifiedInput.value = content;
+    detectedType.value = detected;
+    emit('update:rawEndpoints', content);
+    emit('update:schemaText', '');
+    // Trigger load raw endpoints
+    emit('loadRawEndpoints');
+    return;
+  }
+  
+  // Otherwise, process as OpenAPI schema (JSON/YAML)
+  const contentSize = content.length;
+  const CHUNK_SIZE = 1000 * 1024; // 1000KB
+  
+  if (contentSize <= CHUNK_SIZE) {
+    // Small enough to send in one call
+    const result = await sdk.backend.processUploadedFile(content);
+    
+    if (result.kind === 'Error') {
+      throw new Error(result.error);
+    }
+    
+    // Update the unified input with the processed schema text
+    unifiedInput.value = result.value.schemaText;
+    detectedType.value = detectInputType(result.value.schemaText);
+    
+    // Emit the processed data to parent
+    emit('update:schemaText', result.value.schemaText);
+    emit('fileUploaded', result.value.schemaText, result.value.testCases, result.value.parsedSchema);
+  } else {
+    // Too large - need to chunk
+    const numChunks = Math.ceil(contentSize / CHUNK_SIZE);
+    const metadata = { chunks: numChunks, totalLength: contentSize };
+    
+    // Send chunks sequentially
+    for (let i = 0; i < numChunks; i++) {
+      const start = i * CHUNK_SIZE;
+      const end = Math.min(start + CHUNK_SIZE, contentSize);
+      const chunk = content.substring(start, end);
+      
+      // Only pass metadata with the first chunk
+      let result;
+      if (i === 0) {
+        result = await sdk.backend.saveFileUploadChunk(i, chunk, metadata);
+      } else {
+        result = await sdk.backend.saveFileUploadChunk(i, chunk);
+      }
+      
+      if (result.kind === 'Error') {
+        throw new Error(`Failed to upload chunk ${i + 1}/${numChunks}: ${result.error}`);
+      }
+    }
+    
+    // Process the reassembled content
+    const processResult = await sdk.backend.processUploadedFileChunks();
+    
+    if (processResult.kind === 'Error') {
+      throw new Error(processResult.error);
+    }
+    
+    // Update the unified input with the processed schema text
+    unifiedInput.value = processResult.value.schemaText;
+    detectedType.value = detectInputType(processResult.value.schemaText);
+    
+    // Emit the processed data to parent
+    emit('update:schemaText', processResult.value.schemaText);
+    emit('fileUploaded', processResult.value.schemaText, processResult.value.testCases, processResult.value.parsedSchema);
+  }
+};
+
+// Handle URL fetch
+const handleUrlFetch = async () => {
+  const url = schemaUrl.value.trim();
+  
+  if (!url) {
+    alert('Please enter a URL');
+    return;
+  }
+  
+  // Basic URL validation
+  try {
+    new URL(url);
+  } catch {
+    alert('Please enter a valid URL');
+    return;
+  }
+  
+  isFetching.value = true;
+  
+  try {
+    // Fetch the content from URL using backend (bypasses CORS)
+    // Use a long timeout (5 minutes = 300000ms) for large schemas
+    const result = await sdk.backend.fetchSchemaFromUrl(url, 300000);
+    
+    if (result.kind === 'Error') {
+      throw new Error(result.error);
+    }
+    
+    const content = result.value.content;
+    
+    if (!content || content.trim().length === 0) {
+      throw new Error('The URL returned empty content');
+    }
+    
+    // Process the content the same way as file upload
+    await processContent(content);
+    
+  } catch (error) {
+    console.error('URL fetch error:', error);
+    alert(`Failed to fetch schema from URL: ${error instanceof Error ? error.message : String(error)}`);
+  } finally {
+    isFetching.value = false;
+  }
+};
+
 // Handle file upload
 const handleFileUpload = async (event: Event) => {
   const target = event.target as HTMLInputElement;
@@ -267,65 +413,9 @@ const handleFileUpload = async (event: Event) => {
   try {
     // Read file as text
     const fileContent = await file.text();
-    const fileSize = fileContent.length;
     
-    // Chunk size: 1000KB per chunk (to stay well under RPC limits)
-    const CHUNK_SIZE = 1000 * 1024; // 1000KB
-    
-    if (fileSize <= CHUNK_SIZE) {
-      // Small enough to send in one call
-      const result = await sdk.backend.processUploadedFile(fileContent);
-      
-      if (result.kind === 'Error') {
-        throw new Error(result.error);
-      }
-      
-      // Update the unified input with the processed schema text
-      unifiedInput.value = result.value.schemaText;
-      detectedType.value = detectInputType(result.value.schemaText);
-      
-      // Emit the processed data to parent
-      emit('update:schemaText', result.value.schemaText);
-      emit('fileUploaded', result.value.schemaText, result.value.testCases, result.value.parsedSchema);
-    } else {
-      // Too large - need to chunk
-      const numChunks = Math.ceil(fileSize / CHUNK_SIZE);
-      const metadata = { chunks: numChunks, totalLength: fileSize };
-      
-      // Send chunks sequentially
-      for (let i = 0; i < numChunks; i++) {
-        const start = i * CHUNK_SIZE;
-        const end = Math.min(start + CHUNK_SIZE, fileSize);
-        const chunk = fileContent.substring(start, end);
-        
-        // Only pass metadata with the first chunk
-        let result;
-        if (i === 0) {
-          result = await sdk.backend.saveFileUploadChunk(i, chunk, metadata);
-        } else {
-          result = await sdk.backend.saveFileUploadChunk(i, chunk);
-        }
-        
-        if (result.kind === 'Error') {
-          throw new Error(`Failed to upload chunk ${i + 1}/${numChunks}: ${result.error}`);
-        }
-      }
-      
-      // Process the reassembled file
-      const processResult = await sdk.backend.processUploadedFileChunks();
-      
-      if (processResult.kind === 'Error') {
-        throw new Error(processResult.error);
-      }
-      
-      // Update the unified input with the processed schema text
-      unifiedInput.value = processResult.value.schemaText;
-      detectedType.value = detectInputType(processResult.value.schemaText);
-      
-      // Emit the processed data to parent
-      emit('update:schemaText', processResult.value.schemaText);
-      emit('fileUploaded', processResult.value.schemaText, processResult.value.testCases, processResult.value.parsedSchema);
-    }
+    // Process the content using shared logic
+    await processContent(fileContent);
     
   } catch (error) {
     console.error('File upload error:', error);

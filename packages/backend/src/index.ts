@@ -38,6 +38,7 @@ interface TestCase {
   pathVariables?: string[];
   bodyVariables?: Record<string, any>; // Add body variables
   originalPath?: string;
+  tags?: string[]; // OpenAPI tags
 }
 
 interface TestResult {
@@ -235,7 +236,8 @@ const generateTestCases = (sdk: SDK, schema: OpenAPISchema): TestCase[] => {
           expectedStatus: getExpectedStatus(operation),
           pathVariables,
           bodyVariables,
-          originalPath: path
+          originalPath: path,
+          tags: operation.tags || [] // Extract tags from operation
         };
         
 
@@ -1370,6 +1372,91 @@ const testHttpRequest = async (sdk: SDK, url: string): Promise<{ success: boolea
   }
 };
 
+// Fetch content from a URL (bypasses CORS restrictions)
+const fetchSchemaFromUrl = async (sdk: SDK, url: string, timeoutMs: number = 300000): Promise<Result<{ content: string; contentType: string }>> => {
+  try {
+    // Validate URL
+    try {
+      new URL(url);
+    } catch {
+      return {
+        kind: "Error",
+        error: "Invalid URL format"
+      };
+    }
+    
+    // Parse URL to extract base and path
+    const parsedUrl = new URL(url);
+    const baseUrl = `${parsedUrl.protocol}//${parsedUrl.host}`;
+    const path = parsedUrl.pathname + parsedUrl.search;
+    
+    // Create request spec (same approach as endpoint tests)
+    const spec = new RequestSpec(baseUrl);
+    spec.setMethod("GET");
+    spec.setPath(path);
+    spec.setHeader('User-Agent', 'OpenAPI-Tester/1.0');
+    spec.setHeader('Accept', 'application/json, application/yaml, text/yaml, */*');
+    
+    // Send request using Caido SDK (same as endpoint tests)
+    const sentRequest = await sdk.requests.send(spec);
+    
+    if (!sentRequest || !sentRequest.response) {
+      return {
+        kind: "Error",
+        error: "No response received from server"
+      };
+    }
+    
+    const statusCode = sentRequest.response.getCode();
+    
+    if (statusCode < 200 || statusCode >= 300) {
+      return {
+        kind: "Error",
+        error: `HTTP ${statusCode}: ${sentRequest.response.getStatus() || 'Unknown error'}`
+      };
+    }
+    
+    // Get response body as text (same as endpoint tests)
+    const body = sentRequest.response.getBody();
+    const content = body ? body.toText() : '';
+    
+    if (!content || content.trim().length === 0) {
+      return {
+        kind: "Error",
+        error: "The URL returned empty content"
+      };
+    }
+    
+    // Try to get content type from response headers
+    let contentType = 'text/plain';
+    try {
+      const headers = sentRequest.response.getHeaders();
+      if (headers && typeof headers === 'object') {
+        // Headers is a Record<string, string[]>
+        const contentTypeHeader = headers['content-type'] || headers['Content-Type'];
+        if (contentTypeHeader && Array.isArray(contentTypeHeader) && contentTypeHeader.length > 0) {
+          contentType = contentTypeHeader[0];
+        }
+      }
+    } catch {
+      // If we can't get headers, use default
+    }
+    
+    return {
+      kind: "Ok",
+      value: {
+        content,
+        contentType
+      }
+    };
+  } catch (error) {
+    return {
+      kind: "Error",
+      error: `Failed to fetch from URL: ${error instanceof Error ? error.message : String(error)}`
+    };
+  }
+};
+
 // Determine allowed HTTP methods for endpoints using OPTIONS requests
 const determineMethodsForEndpoints = async (
   sdk: SDK,
@@ -2210,6 +2297,7 @@ export type API = DefineAPI<{
   validateSchema: typeof validateSchema;
   getSchemaInfo: typeof getSchemaInfo;
   testHttpRequest: typeof testHttpRequest;
+  fetchSchemaFromUrl: typeof fetchSchemaFromUrl;
   openTestResultInCaido: typeof openTestResultInCaido;
   sendResultToReplay: typeof sendResultToReplay;
   setEnvironmentVariable: typeof setEnvironmentVariable;
@@ -2257,6 +2345,7 @@ export function init(sdk: SDK<API>) {
   sdk.api.register("validateSchema", validateSchema);
   sdk.api.register("getSchemaInfo", getSchemaInfo);
   sdk.api.register("testHttpRequest", testHttpRequest);
+  sdk.api.register("fetchSchemaFromUrl", fetchSchemaFromUrl);
   sdk.api.register("openTestResultInCaido", openTestResultInCaido);
   sdk.api.register("sendResultToReplay", sendResultToReplay);
   sdk.api.register("setEnvironmentVariable", setEnvironmentVariable);
