@@ -12,7 +12,7 @@ export default defineConfig({
   id,
   name: "OpenAPI",
   description: "Accelerate endpoint testing by providing schemas or paths. ",
-  version: "1.0.10",
+  version: "1.0.11",
   author: {
     name: "xvffdos",
     email: "dev@xvffdos.com",
